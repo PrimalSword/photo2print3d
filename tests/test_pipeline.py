@@ -107,6 +107,7 @@ def test_finish_reconstruction_reuses_raw_mesh_and_exports_stages(tmp_path):
         add_base=True,
         base_height_mm=4.0,
         base_margin_mm=5.0,
+        refinement_passes=1,
         smoothing_level="Média",
         cleanup_min_shell_percent=0.5,
         settings=settings,
@@ -116,7 +117,10 @@ def test_finish_reconstruction_reuses_raw_mesh_and_exports_stages(tmp_path):
 
     assert result.stl_path.exists()
     assert result.cleaned_mesh_path.exists()
+    assert result.refined_mesh_path.exists()
     assert result.smoothed_mesh_path.exists()
+    assert result.report.refinement_passes == 1
+    assert result.report.refined_faces == result.report.pre_refine_faces * 4
     assert result.report.smoothing_level == "medium"
     assert result.report.final_watertight is True
     assert math.isclose(float(prepared.extents[2]), 140.0, rel_tol=1e-4)
