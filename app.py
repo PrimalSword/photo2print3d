@@ -8,15 +8,27 @@ from photo2print3d.config import Settings
 from photo2print3d.mesh import MeshReport, prepare_mesh
 from photo2print3d.pipeline import finish_reconstruction, generate_printable_model
 
-TITLE = "Photo2Print3D V3"
+TITLE = "Photo2Print3D V4"
 
 
 def _finish_status(report: MeshReport, *, prefix: str) -> str:
     removed = report.removed_shells
     cleanup_note = f" Limpeza removeu {removed} ilha(s) isolada(s)." if removed else ""
+    refinement_note = ""
+    if report.refinement_passes:
+        refinement_note = (
+            f" Refino {report.refinement_passes}x: "
+            f"{report.pre_refine_faces:,} → {report.refined_faces:,} faces."
+        )
     if report.warnings:
-        return f"⚠️ {prefix}.{cleanup_note} Leia o relatório e confira no slicer."
-    return f"✅ {prefix}.{cleanup_note} Abra no slicer e confira a prévia antes de imprimir."
+        return (
+            f"⚠️ {prefix}.{cleanup_note}{refinement_note} "
+            "Leia o relatório e confira no slicer."
+        )
+    return (
+        f"✅ {prefix}.{cleanup_note}{refinement_note} "
+        "Abra no slicer e confira a prévia antes de imprimir."
+    )
 
 
 def _generate_from_image(
@@ -27,6 +39,7 @@ def _generate_from_image(
     base_margin_mm: float,
     mc_resolution: int,
     foreground_ratio: float,
+    refinement_passes: int,
     smoothing_level: str,
     cleanup_min_shell_percent: float,
 ):
@@ -42,6 +55,7 @@ def _generate_from_image(
             base_margin_mm=float(base_margin_mm),
             mc_resolution=int(mc_resolution),
             foreground_ratio=float(foreground_ratio),
+            refinement_passes=int(refinement_passes),
             smoothing_level=str(smoothing_level),
             cleanup_min_shell_percent=float(cleanup_min_shell_percent),
         )
@@ -49,11 +63,9 @@ def _generate_from_image(
         raise gr.Error(str(exc)) from exc
 
     if result.cache_hit:
-        cache_note = (
-            "♻️ **Cache V3:** a reconstrução 3D já existia; o TripoSR não rodou novamente. "
-        )
+        cache_note = "♻️ **Cache:** a reconstrução 3D já existia; o TripoSR não rodou novamente. "
     else:
-        cache_note = "🧠 **Cache V3:** reconstrução nova salva para reutilização. "
+        cache_note = "🧠 **Cache:** reconstrução nova salva para reutilização. "
 
     status = cache_note + _finish_status(result.report, prefix="STL gerado")
     return (
@@ -64,6 +76,7 @@ def _generate_from_image(
         str(result.raw_mesh_path),
         str(result.raw_mesh_path),
         str(result.cleaned_mesh_path),
+        str(result.refined_mesh_path),
         str(result.smoothed_mesh_path),
     )
 
@@ -74,6 +87,7 @@ def _reprocess_cached(
     add_base: bool,
     base_height_mm: float,
     base_margin_mm: float,
+    refinement_passes: int,
     smoothing_level: str,
     cleanup_min_shell_percent: float,
 ):
@@ -87,6 +101,7 @@ def _reprocess_cached(
             add_base=bool(add_base),
             base_height_mm=float(base_height_mm),
             base_margin_mm=float(base_margin_mm),
+            refinement_passes=int(refinement_passes),
             smoothing_level=str(smoothing_level),
             cleanup_min_shell_percent=float(cleanup_min_shell_percent),
         )
@@ -103,6 +118,7 @@ def _reprocess_cached(
         result.report.to_dict(),
         status,
         str(result.cleaned_mesh_path),
+        str(result.refined_mesh_path),
         str(result.smoothed_mesh_path),
     )
 
@@ -113,6 +129,7 @@ def _prepare_existing_mesh(
     add_base: bool,
     base_height_mm: float,
     base_margin_mm: float,
+    refinement_passes: int,
     smoothing_level: str,
     cleanup_min_shell_percent: float,
 ):
@@ -134,6 +151,7 @@ def _prepare_existing_mesh(
             add_base=bool(add_base),
             base_height_mm=float(base_height_mm),
             base_margin_mm=float(base_margin_mm),
+            refinement_passes=int(refinement_passes),
             smoothing_level=str(smoothing_level),
             cleanup_min_shell_percent=float(cleanup_min_shell_percent),
             artifacts_dir=artifacts_dir,
@@ -149,12 +167,11 @@ with gr.Blocks(title=TITLE) as demo:
     raw_mesh_state = gr.State(value=None)
 
     gr.Markdown(
-        "# Photo2Print3D V3\n"
-        "**Imagem → reconstrução 3D cacheada → limpeza → suavização → escala em mm → "
-        "base → validação → STL.**\n\n"
-        "A reconstrução pesada agora é reaproveitada. Depois do primeiro processamento, você "
-        "pode testar suavização, base, limpeza e altura sem fazer o Xeon reconstruir o cidadão "
-        "do zero toda vez."
+        "# Photo2Print3D V4\n"
+        "**Imagem → reconstrução 3D cacheada → limpeza → refino de superfície → suavização → "
+        "escala em mm → base → validação → STL.**\n\n"
+        "A V4 cria geometria intermediária antes da suavização. Assim o acabamento deixa de "
+        "apenas empurrar os mesmos vértices grossos e passa a ter mais pontos para formar curvas."
     )
 
     with gr.Tab("Foto → STL"):
@@ -204,11 +221,19 @@ with gr.Blocks(title=TITLE) as demo:
                     )
                     gr.Markdown(
                         "Alterar **perfil de reconstrução** ou **ocupação** exige reconstruir. "
-                        "Se imagem + esses dois parâmetros forem iguais a um processamento "
-                        "anterior, a V3 recupera a malha do cache automaticamente."
+                        "A mesma imagem + esses parâmetros reaproveita o cache."
                     )
 
-                with gr.Accordion("Acabamento", open=True):
+                with gr.Accordion("Acabamento V4", open=True):
+                    refinement = gr.Dropdown(
+                        choices=[
+                            ("Desligado — malha original", 0),
+                            ("1x — recomendado (≈ 4× faces)", 1),
+                            ("2x — experimental (≈ 16× faces)", 2),
+                        ],
+                        value=1,
+                        label="Refino da superfície",
+                    )
                     smoothing = gr.Dropdown(
                         choices=["Desligado", "Leve", "Média", "Forte"],
                         value="Média",
@@ -222,8 +247,10 @@ with gr.Blocks(title=TITLE) as demo:
                         label="Limpeza conservadora de ilhas (% do maior shell)",
                     )
                     gr.Markdown(
-                        "Suavização, limpeza, altura e base podem ser alteradas com "
-                        "**Reprocessar acabamento**, sem rodar o TripoSR novamente."
+                        "**1x** subdivide cada triângulo em quatro antes do Taubin e é o teste "
+                        "recomendado. **2x** pode chegar perto de 650 mil faces numa malha 192 e "
+                        "é experimental. Refino, suavização, limpeza, altura e base usam o botão "
+                        "de reprocessamento e não rodam o TripoSR."
                     )
 
                 generate_button = gr.Button("Reconstruir + gerar STL", variant="primary")
@@ -235,12 +262,13 @@ with gr.Blocks(title=TITLE) as demo:
                 status = gr.Markdown()
                 report = gr.JSON(label="Relatório de imprimibilidade")
 
-                with gr.Accordion("Arquivos técnicos V3", open=False):
+                with gr.Accordion("Arquivos técnicos V4", open=False):
                     gr.Markdown(
                         "Arquivos intermediários para comparação, diagnóstico ou edição externa."
                     )
                     raw_download = gr.File(label="Malha bruta do TripoSR (OBJ)")
                     cleaned_download = gr.File(label="Após limpeza conservadora (OBJ)")
+                    refined_download = gr.File(label="Após refino da superfície (OBJ)")
                     smoothed_download = gr.File(label="Após suavização (OBJ)")
 
         generate_button.click(
@@ -253,6 +281,7 @@ with gr.Blocks(title=TITLE) as demo:
                 base_margin,
                 resolution,
                 foreground_ratio,
+                refinement,
                 smoothing,
                 cleanup_percent,
             ],
@@ -264,6 +293,7 @@ with gr.Blocks(title=TITLE) as demo:
                 raw_mesh_state,
                 raw_download,
                 cleaned_download,
+                refined_download,
                 smoothed_download,
             ],
         )
@@ -276,6 +306,7 @@ with gr.Blocks(title=TITLE) as demo:
                 add_base,
                 base_height,
                 base_margin,
+                refinement,
                 smoothing,
                 cleanup_percent,
             ],
@@ -285,14 +316,15 @@ with gr.Blocks(title=TITLE) as demo:
                 report,
                 status,
                 cleaned_download,
+                refined_download,
                 smoothed_download,
             ],
         )
 
     with gr.Tab("Malha pronta → STL"):
         gr.Markdown(
-            "Use esta aba quando você já tiver um `.obj`, `.glb`, `.gltf`, `.ply` ou `.stl` e "
-            "quiser escalar, reparar, suavizar, limpar ilhas e adicionar base."
+            "Use esta aba quando você já tiver um `.obj`, `.glb`, `.gltf`, `.ply` ou `.stl`. "
+            "O refino fica desligado por padrão para não alterar uma malha externa sem intenção."
         )
         with gr.Row():
             with gr.Column():
@@ -318,6 +350,15 @@ with gr.Blocks(title=TITLE) as demo:
                     value=3,
                     step=0.5,
                     label="Margem da base (mm)",
+                )
+                mesh_refinement = gr.Dropdown(
+                    choices=[
+                        ("Desligado", 0),
+                        ("1x", 1),
+                        ("2x — experimental", 2),
+                    ],
+                    value=0,
+                    label="Refino da superfície",
                 )
                 mesh_smoothing = gr.Dropdown(
                     choices=["Desligado", "Leve", "Média", "Forte"],
@@ -346,6 +387,7 @@ with gr.Blocks(title=TITLE) as demo:
                 mesh_base,
                 mesh_base_height,
                 mesh_base_margin,
+                mesh_refinement,
                 mesh_smoothing,
                 mesh_cleanup,
             ],
@@ -360,7 +402,8 @@ with gr.Blocks(title=TITLE) as demo:
     gr.Markdown(
         "---\n"
         "**Regra do MVP:** arquivo gerado por IA nunca pula a inspeção no slicer. "
-        "Se o relatório disser `final_watertight: false`, trate como pendência de reparo."
+        "Refino deixa a superfície mais densa, mas não cria detalhes que a reconstrução original "
+        "não capturou. Se `final_watertight: false`, trate como pendência de reparo."
     )
 
 

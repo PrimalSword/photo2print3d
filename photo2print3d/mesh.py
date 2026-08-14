@@ -5,6 +5,7 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
+from trimesh.remesh import subdivide
 from trimesh.smoothing import filter_taubin
 
 
@@ -28,6 +29,7 @@ SMOOTHING_ALIASES = {
 }
 
 DEFAULT_BASE_EMBED_MM = 0.8
+MAX_REFINED_FACES = 750_000
 
 
 @dataclass
@@ -39,6 +41,11 @@ class MeshReport:
     source_shells: int
     cleaned_shells: int
     removed_shells: int
+    refinement_passes: int
+    pre_refine_vertices: int
+    pre_refine_faces: int
+    refined_vertices: int
+    refined_faces: int
     final_shells: int
     source_watertight: bool
     final_watertight: bool
@@ -77,6 +84,16 @@ def _normalise_smoothing_level(level: str) -> str:
         valid = ", ".join(SMOOTHING_ITERATIONS)
         raise MeshError(f"Unknown smoothing level '{level}'. Valid values: {valid}.")
     return key
+
+
+def _normalise_refinement_passes(passes: int) -> int:
+    try:
+        value = int(passes)
+    except (TypeError, ValueError) as exc:
+        raise MeshError("Surface refinement must be 0, 1 or 2 passes.") from exc
+    if value not in (0, 1, 2):
+        raise MeshError("Surface refinement must be 0, 1 or 2 passes.")
+    return value
 
 
 def repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -196,6 +213,53 @@ def cleanup_small_shells(
     return repair_mesh(cleaned), removed
 
 
+def refine_mesh(
+    mesh: trimesh.Trimesh,
+    passes: int = 0,
+    *,
+    max_faces: int = MAX_REFINED_FACES,
+) -> trimesh.Trimesh:
+    """Uniformly subdivide every triangle before smoothing.
+
+    One pass turns every triangle into four triangles. Because all faces are
+    subdivided together, shared edge midpoints are reused and a watertight input
+    remains watertight. The operation does not invent new source detail by itself;
+    it creates enough vertices for the following smoothing stage to form gentler
+    curves instead of only moving the coarse TripoSR vertices.
+    """
+
+    count = _normalise_refinement_passes(passes)
+    refined = mesh.copy()
+
+    for _ in range(count):
+        predicted_faces = int(len(refined.faces)) * 4
+        if predicted_faces > int(max_faces):
+            raise MeshError(
+                "Surface refinement would create "
+                f"{predicted_faces:,} faces, above the safety limit of {int(max_faces):,}. "
+                "Use fewer refinement passes or a lower reconstruction resolution."
+            )
+
+        try:
+            vertices, faces = subdivide(
+                np.asarray(refined.vertices, dtype=float),
+                np.asarray(refined.faces, dtype=np.int64),
+            )
+        except Exception as exc:
+            raise MeshError(f"Surface refinement failed: {exc}") from exc
+
+        refined = trimesh.Trimesh(
+            vertices=vertices,
+            faces=faces,
+            process=False,
+        )
+
+    if count:
+        refined = repair_mesh(refined)
+
+    return refined
+
+
 def smooth_mesh(mesh: trimesh.Trimesh, level: str = "off") -> trimesh.Trimesh:
     """Apply conservative Taubin smoothing without changing mesh topology."""
 
@@ -313,6 +377,7 @@ def prepare_mesh(
     base_margin_mm: float = 3.0,
     smoothing_level: str = "off",
     cleanup_min_shell_percent: float = 0.0,
+    refinement_passes: int = 0,
     artifacts_dir: str | Path | None = None,
 ) -> tuple[Path, MeshReport]:
     source = Path(source)
@@ -330,6 +395,14 @@ def prepare_mesh(
     )
     cleaned_shells = _shell_count(mesh)
     _export_stage(mesh, artifacts_dir, "cleaned-source.obj")
+
+    refinement_key = _normalise_refinement_passes(refinement_passes)
+    pre_refine_vertices = int(len(mesh.vertices))
+    pre_refine_faces = int(len(mesh.faces))
+    mesh = refine_mesh(mesh, refinement_key)
+    refined_vertices = int(len(mesh.vertices))
+    refined_faces = int(len(mesh.faces))
+    _export_stage(mesh, artifacts_dir, "refined-source.obj")
 
     smoothing_key = _normalise_smoothing_level(smoothing_level)
     mesh = smooth_mesh(mesh, smoothing_key)
@@ -357,6 +430,11 @@ def prepare_mesh(
         warnings.append(
             f"The prepared source contains {cleaned_shells} disconnected shells after "
             "conservative cleanup. Inspect for floating geometry."
+        )
+    if refined_faces > 400_000:
+        warnings.append(
+            f"Surface refinement produced {refined_faces:,} faces. This is an experimental "
+            "high-density finish and may be slow to edit or slice."
         )
 
     if add_base:
@@ -396,6 +474,11 @@ def prepare_mesh(
         source_shells=source_shells,
         cleaned_shells=cleaned_shells,
         removed_shells=removed_shells,
+        refinement_passes=refinement_key,
+        pre_refine_vertices=pre_refine_vertices,
+        pre_refine_faces=pre_refine_faces,
+        refined_vertices=refined_vertices,
+        refined_faces=refined_faces,
         final_shells=final_shells,
         source_watertight=source_watertight,
         final_watertight=final_watertight,

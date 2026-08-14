@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import trimesh
 
-from photo2print3d.mesh import prepare_mesh
+from photo2print3d.mesh import MeshError, prepare_mesh, refine_mesh
 
 
 def test_prepare_mesh_scales_longest_axis_and_floors(tmp_path):
@@ -99,7 +100,38 @@ def test_smoothing_level_is_reported(tmp_path):
     assert report.final_watertight is True
 
 
-def test_prepare_mesh_exports_cleaned_and_smoothed_sources(tmp_path):
+def test_refinement_one_pass_quadruples_triangle_count(tmp_path):
+    source = tmp_path / "sphere.obj"
+    output = tmp_path / "refined.stl"
+
+    mesh = trimesh.creation.icosphere(subdivisions=1, radius=1.0)
+    original_faces = len(mesh.faces)
+    mesh.export(source)
+
+    _, report = prepare_mesh(
+        source,
+        output,
+        target_height_mm=100.0,
+        add_base=False,
+        refinement_passes=1,
+        smoothing_level="Desligado",
+    )
+
+    assert report.refinement_passes == 1
+    assert report.pre_refine_faces == original_faces
+    assert report.refined_faces == original_faces * 4
+    assert report.refined_vertices > report.pre_refine_vertices
+    assert report.final_watertight is True
+
+
+def test_refinement_safety_limit_blocks_excessive_density():
+    mesh = trimesh.creation.icosphere(subdivisions=1, radius=1.0)
+
+    with pytest.raises(MeshError, match="safety limit"):
+        refine_mesh(mesh, 1, max_faces=100)
+
+
+def test_prepare_mesh_exports_cleaned_refined_and_smoothed_sources(tmp_path):
     source = tmp_path / "sphere.obj"
     output = tmp_path / "prepared.stl"
     artifacts = tmp_path / "artifacts"
@@ -111,11 +143,14 @@ def test_prepare_mesh_exports_cleaned_and_smoothed_sources(tmp_path):
         output,
         target_height_mm=100.0,
         add_base=False,
+        refinement_passes=1,
         smoothing_level="Média",
         artifacts_dir=artifacts,
     )
 
     assert (artifacts / "cleaned-source.obj").exists()
+    assert (artifacts / "refined-source.obj").exists()
     assert (artifacts / "smoothed-source.obj").exists()
     assert (artifacts / "cleaned-source.obj").stat().st_size > 0
+    assert (artifacts / "refined-source.obj").stat().st_size > 0
     assert (artifacts / "smoothed-source.obj").stat().st_size > 0
