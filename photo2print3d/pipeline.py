@@ -28,6 +28,7 @@ class ReconstructionResult:
 class FinishResult:
     stl_path: Path
     cleaned_mesh_path: Path
+    refined_mesh_path: Path
     smoothed_mesh_path: Path
     report: MeshReport
 
@@ -37,6 +38,7 @@ class PipelineResult:
     stl_path: Path
     raw_mesh_path: Path
     cleaned_mesh_path: Path
+    refined_mesh_path: Path
     smoothed_mesh_path: Path
     prepared_image_path: Path
     report: MeshReport
@@ -151,11 +153,12 @@ def finish_reconstruction(
     add_base: bool = True,
     base_height_mm: float = 4.0,
     base_margin_mm: float = 5.0,
+    refinement_passes: int = 1,
     smoothing_level: str = "medium",
     cleanup_min_shell_percent: float = 0.5,
     settings: Settings | None = None,
 ) -> FinishResult:
-    """Re-run only cheap mesh finishing steps; never invoke the 3D reconstruction model."""
+    """Re-run only mesh finishing steps; never invoke the 3D reconstruction model."""
 
     settings = settings or Settings.from_env()
     settings.ensure_runtime_dirs()
@@ -178,6 +181,7 @@ def finish_reconstruction(
         add_base=add_base,
         base_height_mm=base_height_mm,
         base_margin_mm=base_margin_mm,
+        refinement_passes=refinement_passes,
         smoothing_level=smoothing_level,
         cleanup_min_shell_percent=cleanup_min_shell_percent,
         artifacts_dir=artifacts_dir,
@@ -186,6 +190,7 @@ def finish_reconstruction(
     return FinishResult(
         stl_path=stl_path,
         cleaned_mesh_path=artifacts_dir / "cleaned-source.obj",
+        refined_mesh_path=artifacts_dir / "refined-source.obj",
         smoothed_mesh_path=artifacts_dir / "smoothed-source.obj",
         report=report,
     )
@@ -200,6 +205,7 @@ def generate_printable_model(
     base_margin_mm: float = 5.0,
     mc_resolution: int = 192,
     foreground_ratio: float = 0.85,
+    refinement_passes: int = 1,
     smoothing_level: str = "medium",
     cleanup_min_shell_percent: float = 0.5,
     settings: Settings | None = None,
@@ -218,6 +224,7 @@ def generate_printable_model(
         add_base=add_base,
         base_height_mm=base_height_mm,
         base_margin_mm=base_margin_mm,
+        refinement_passes=refinement_passes,
         smoothing_level=smoothing_level,
         cleanup_min_shell_percent=cleanup_min_shell_percent,
         settings=settings,
@@ -227,6 +234,7 @@ def generate_printable_model(
         stl_path=finishing.stl_path,
         raw_mesh_path=reconstruction.raw_mesh_path,
         cleaned_mesh_path=finishing.cleaned_mesh_path,
+        refined_mesh_path=finishing.refined_mesh_path,
         smoothed_mesh_path=finishing.smoothed_mesh_path,
         prepared_image_path=reconstruction.prepared_image_path,
         report=finishing.report,
