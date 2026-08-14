@@ -8,7 +8,6 @@ from photo2print3d.config import Settings
 from photo2print3d.mesh import prepare_mesh
 from photo2print3d.pipeline import generate_printable_model
 
-
 TITLE = "Photo2Print3D"
 
 
@@ -125,9 +124,13 @@ with gr.Blocks(title=TITLE) as demo:
                         label="Margem da base (mm)",
                     )
                 with gr.Accordion("Motor 3D", open=False):
+                    gr.Markdown(
+                        "**CPU/baixa memória:** comece em `128`. "
+                        "Suba para `192` ou `256` só depois de validar o primeiro modelo."
+                    )
                     resolution = gr.Dropdown(
-                        choices=[128, 192, 256, 320, 384],
-                        value=256,
+                        choices=[96, 128, 192, 256, 320, 384],
+                        value=128,
                         label="Marching cubes resolution",
                     )
                     foreground_ratio = gr.Slider(
