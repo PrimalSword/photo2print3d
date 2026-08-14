@@ -7,12 +7,20 @@ set "VENV_PY=%PROJECT_ROOT%\.venv\Scripts\python.exe"
 echo [Photo2Print3D] Windows CPU bootstrap
 
 if not exist "%VENV_PY%" (
-  echo Creating virtual environment...
-  python -m venv "%PROJECT_ROOT%\.venv"
+  echo Creating Python 3.11 virtual environment...
+  py -3.11 -m venv "%PROJECT_ROOT%\.venv" >nul 2>&1
   if errorlevel 1 (
-    echo ERROR: Could not create the virtual environment. Make sure `python` works from this terminal.
+    echo ERROR: Python 3.11 was not found through the Windows py launcher.
+    echo Install Python 3.11, reopen PowerShell, and run this command again.
     exit /b 1
   )
+)
+
+"%VENV_PY%" -c "import sys; print('Using Python', sys.version.split()[0]); raise SystemExit(0 if sys.version_info[:2] == (3, 11) else 1)"
+if errorlevel 1 (
+  echo ERROR: The existing .venv is not Python 3.11.
+  echo Delete .venv and run this setup again.
+  exit /b 1
 )
 
 echo Installing Photo2Print3D into the virtual environment...
