@@ -5,13 +5,15 @@ Photo2Print3D is an experimental local-first pipeline that turns a single refere
 The project is intentionally split into two layers:
 
 1. **3D reconstruction engine** — replaceable. The first adapter targets the official TripoSR project.
-2. **Printability pipeline** — our code. It repairs simple defects, removes conservative floating geometry, optionally smooths the mesh, scales it in millimetres, adds a printable base, validates the result and exports STL.
+2. **Printability pipeline** — our code. It repairs defects, cleans conservative floating geometry, optionally refines and smooths the surface, scales in millimetres, adds a base, validates the result and exports STL.
 
-The immediate MVP is deliberately narrow: **image in → printable STL out**.
+The immediate MVP remains deliberately narrow: **image in → printable STL out**.
 
 ## Status
 
-V3 MVP. The heavy single-image reconstruction is now content-addressed and cached locally. Once a raw TripoSR mesh exists, height, base, shell cleanup and Taubin smoothing can be reprocessed without invoking TripoSR again.
+V4 MVP. Heavy TripoSR reconstruction remains content-addressed and cached locally. V4 adds a true geometry-density stage before Taubin smoothing: every refinement pass subdivides each triangle into four while preserving shared edge midpoints.
+
+This does **not** invent detail that TripoSR failed to reconstruct. Its purpose is to give smoothing more vertices to work with so coarse faceting can become gentler curvature.
 
 Generated meshes still require slicer inspection before printing.
 
@@ -50,25 +52,19 @@ pip install -e .
 photo2print3d doctor
 ```
 
-This reports the active Python executable, NVIDIA GPU/VRAM when available, PyTorch/CUDA status and whether TripoSR is installed in the expected location.
-
 ### 4. Install TripoSR
 
-The easiest supported integration is to clone the official TripoSR repository into `vendor/TripoSR`.
-
-#### Windows with NVIDIA/CUDA configured
-
-```powershell
-.\scripts\setup_triposr.ps1
-```
-
-#### Windows CPU / unsupported or low-memory GPU
+Windows CPU / unsupported or low-memory GPU:
 
 ```powershell
 .\scripts\setup_cpu_windows.ps1
 ```
 
-The Windows setup installs a known-compatible Gradio/Transformers/Hugging Face stack, ONNX Runtime for `rembg`, the CPU marching-cubes compatibility layer and then validates the environment with `pip check`.
+Windows with NVIDIA/CUDA configured:
+
+```powershell
+.\scripts\setup_triposr.ps1
+```
 
 Linux/macOS:
 
@@ -76,7 +72,7 @@ Linux/macOS:
 bash scripts/setup_triposr.sh
 ```
 
-> On a 16 GB CPU-only workstation, resolution `192` is the recommended quality preset. Resolution `256` is experimental and can force heavy paging; `128` remains the fast/low-memory option.
+> On a 16 GB CPU-only workstation, reconstruction resolution `192` is the recommended balance. `256` remains experimental. Surface refinement is a finishing operation and therefore reuses the cached raw mesh.
 
 ### 5. Launch the app
 
@@ -86,33 +82,36 @@ python app.py
 
 Open the local Gradio URL shown in the terminal.
 
-## V3 workflow
+## V4 workflow
 
-The image tab now separates **reconstruction** from **finishing**.
+The image tab separates **reconstruction** from **finishing**.
 
 ### Reconstruction controls
 
 - **Rápido — 128** — lower memory / faster iteration;
 - **Recomendado — 192** — default quality balance;
 - **Experimental — 256** — high memory use;
-- **foreground occupancy** — controls how much of the TripoSR input frame is occupied by the subject.
+- **foreground occupancy** — subject occupancy in the TripoSR input frame.
 
-A reconstruction cache key is derived from the prepared image, marching-cubes resolution, foreground ratio and a cache schema version. Repeating the same reconstruction reuses the cached raw OBJ even after restarting the app.
-
-Cached geometry lives under:
+The raw reconstruction is cached by prepared image + reconstruction resolution + occupancy. Repeating those inputs reuses:
 
 ```text
-work/cache/reconstructions/<sha256>/
+work/cache/reconstructions/<sha256>/raw/mesh.obj
 ```
 
-### Finishing controls
+### V4 finishing controls
 
-- **Taubin smoothing** — Off, Light, Medium or Strong. Medium is the V3 default for generated meshes based on the current FDM test workflow;
-- **Conservative island cleanup** — removes only tiny components that are both small and spatially isolated;
-- **Exact total height** — the chosen height includes the visible base;
-- **Base height / margin** — can be changed without reconstructing the image.
+- **Surface refinement 0x** — keep original topology;
+- **Surface refinement 1x** — recommended; approximately 4× the source face count;
+- **Surface refinement 2x** — experimental; approximately 16× the source face count and guarded by a 750,000-face safety limit;
+- **Taubin smoothing** — Off, Light, Medium or Strong; Medium remains the generated-mesh default;
+- **Conservative island cleanup** — removes only tiny, spatially isolated components;
+- **Exact total height** — includes the visible base;
+- **Base height / margin** — can be changed without reconstructing.
 
-After the first reconstruction, use **Reprocessar acabamento sem reconstruir** to change smoothing, cleanup, total height or base. This runs only the lightweight mesh pipeline.
+For the current 192 test model with about 41,000 source faces, one refinement pass should produce about 164,000 faces. Two passes would approach 657,000 faces and are therefore experimental.
+
+After the first reconstruction, use **Reprocessar acabamento sem reconstruir** to change refinement, smoothing, cleanup, height or base without invoking TripoSR.
 
 ### Technical artifacts
 
@@ -120,12 +119,11 @@ Every generated result exposes:
 
 - raw TripoSR OBJ;
 - OBJ after conservative shell cleanup;
+- OBJ after surface refinement;
 - OBJ after Taubin smoothing;
 - final STL.
 
-These artifacts make A/B comparison and external Blender/mesh-editor inspection easier.
-
-## How the V3 pipeline works
+## How the V4 pipeline works
 
 ```text
 reference image
@@ -138,11 +136,13 @@ TripoSR
       ↓
 raw OBJ
       ↓
-repair
-      ↓
-conservative floating-shell cleanup
+repair + conservative floating-shell cleanup
       ↓
 cleaned-source.obj
+      ↓
+uniform surface subdivision (0x / 1x / 2x)
+      ↓
+refined-source.obj
       ↓
 Taubin smoothing
       ↓
@@ -157,42 +157,41 @@ printability report
 STL
 ```
 
-Changing only finishing parameters starts from the cached raw OBJ and skips every step above it.
-
 ## CLI
 
-If you already have a mesh and only want to prepare it for printing:
+Recommended image workflow:
+
+```bash
+photo2print3d generate reference.png --height-mm 140 --mc-resolution 192 --refinement 1 --smoothing medium --cleanup-percent 0.5 --output output.stl
+```
+
+Prepare an existing mesh without changing topology by default:
 
 ```bash
 photo2print3d prepare input.obj --height-mm 120 --base --output output.stl
-```
-
-To run the full image pipeline:
-
-```bash
-photo2print3d generate reference.png --height-mm 120 --base --output output.stl
 ```
 
 ## Current printability checks
 
 The report includes:
 
-- mesh bounds and final dimensions in millimetres;
-- source shell count;
-- shell count after conservative cleanup;
-- number of removed isolated shells;
+- final dimensions in millimetres;
+- source shell count and shell count after cleanup;
+- removed isolated shell count;
+- refinement passes;
+- vertex/face counts before and after refinement;
 - final connected-body count;
 - source and final watertight status;
 - winding consistency;
 - volume when available;
-- selected smoothing level and cleanup threshold;
+- smoothing level and cleanup threshold;
 - whether a base was added.
 
-It also attempts conservative hole filling and normal repair. A `final_watertight: false` report is a hard warning: inspect or repair the mesh before sending it to the slicer.
+A high-density warning is added above 400,000 refined faces. A `final_watertight: false` report remains a hard warning requiring slicer/mesh inspection.
 
 ## Roadmap
 
-- Blender headless repair backend for robust voxel remeshing / true boolean base union;
+- voxel/remesh or Blender backend for robust shell union and true base boolean;
 - automatic support-risk analysis;
 - minimum-thickness analysis;
 - selectable base styles and engraved names;
@@ -208,4 +207,4 @@ Photo2Print3D does not vendor TripoSR. The setup scripts clone the official proj
 
 ## Safety note for printing
 
-Generated geometry is probabilistic. Always inspect the model in a slicer before printing. Do not use this pipeline for safety-critical, load-bearing, medical, food-contact or other regulated parts without an appropriate engineering validation process.
+Generated geometry is probabilistic. Always inspect the model in a slicer before printing. Do not use this pipeline for safety-critical, load-bearing, medical, food-contact or other regulated parts without appropriate engineering validation.
