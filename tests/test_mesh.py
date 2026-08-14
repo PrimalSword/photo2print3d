@@ -11,7 +11,6 @@ def test_prepare_mesh_scales_longest_axis_and_floors(tmp_path):
     source = tmp_path / "source.obj"
     output = tmp_path / "prepared.stl"
 
-    # Intentionally make Y the longest axis so the auto-orientation path is tested.
     mesh = trimesh.creation.box(extents=[2.0, 10.0, 3.0])
     mesh.export(source)
 
@@ -98,3 +97,25 @@ def test_smoothing_level_is_reported(tmp_path):
 
     assert report.smoothing_level == "light"
     assert report.final_watertight is True
+
+
+def test_prepare_mesh_exports_cleaned_and_smoothed_sources(tmp_path):
+    source = tmp_path / "sphere.obj"
+    output = tmp_path / "prepared.stl"
+    artifacts = tmp_path / "artifacts"
+
+    trimesh.creation.icosphere(subdivisions=2, radius=1.0).export(source)
+
+    prepare_mesh(
+        source,
+        output,
+        target_height_mm=100.0,
+        add_base=False,
+        smoothing_level="Média",
+        artifacts_dir=artifacts,
+    )
+
+    assert (artifacts / "cleaned-source.obj").exists()
+    assert (artifacts / "smoothed-source.obj").exists()
+    assert (artifacts / "cleaned-source.obj").stat().st_size > 0
+    assert (artifacts / "smoothed-source.obj").stat().st_size > 0
