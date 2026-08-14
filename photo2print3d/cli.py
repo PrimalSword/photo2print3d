@@ -6,12 +6,20 @@ from pathlib import Path
 from rich.console import Console
 import typer
 
+from .doctor import system_report
 from .mesh import prepare_mesh
 from .pipeline import generate_printable_model
 
 
 app = typer.Typer(no_args_is_help=True, help="Photo2Print3D command-line tools.")
 console = Console()
+
+
+@app.command()
+def doctor() -> None:
+    """Show the local Python, GPU, PyTorch and TripoSR setup status."""
+
+    console.print_json(json.dumps(system_report()))
 
 
 @app.command()
