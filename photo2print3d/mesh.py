@@ -5,10 +5,29 @@ from pathlib import Path
 
 import numpy as np
 import trimesh
+from trimesh.smoothing import filter_taubin
 
 
 class MeshError(RuntimeError):
     """Raised when a mesh cannot be prepared safely enough to export."""
+
+
+SMOOTHING_ITERATIONS = {
+    "off": 0,
+    "light": 4,
+    "medium": 8,
+    "strong": 12,
+}
+
+SMOOTHING_ALIASES = {
+    "desligado": "off",
+    "leve": "light",
+    "média": "medium",
+    "media": "medium",
+    "forte": "strong",
+}
+
+DEFAULT_BASE_EMBED_MM = 0.8
 
 
 @dataclass
@@ -18,6 +37,8 @@ class MeshReport:
     vertices: int
     faces: int
     source_shells: int
+    cleaned_shells: int
+    removed_shells: int
     final_shells: int
     source_watertight: bool
     final_watertight: bool
@@ -25,6 +46,8 @@ class MeshReport:
     volume_mm3: float | None
     base_added: bool
     up_axis_detected: str
+    smoothing_level: str
+    cleanup_min_shell_percent: float
     warnings: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -45,6 +68,15 @@ def _shell_count(mesh: trimesh.Trimesh) -> int:
         return len(mesh.split(only_watertight=False))
     except Exception:
         return 1
+
+
+def _normalise_smoothing_level(level: str) -> str:
+    key = str(level).strip().lower()
+    key = SMOOTHING_ALIASES.get(key, key)
+    if key not in SMOOTHING_ITERATIONS:
+        valid = ", ".join(SMOOTHING_ITERATIONS)
+        raise MeshError(f"Unknown smoothing level '{level}'. Valid values: {valid}.")
+    return key
 
 
 def repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
@@ -82,6 +114,119 @@ def repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
         pass
 
     return mesh
+
+
+def _shell_score(shell: trimesh.Trimesh) -> float:
+    """Prefer volume for closed bodies and fall back to surface area."""
+
+    try:
+        if shell.is_volume:
+            volume = float(abs(shell.volume))
+            if np.isfinite(volume) and volume > 0:
+                return volume
+    except Exception:
+        pass
+
+    try:
+        area = float(shell.area)
+        if np.isfinite(area) and area > 0:
+            return area
+    except Exception:
+        pass
+
+    return 0.0
+
+
+def _aabb_gap(a: trimesh.Trimesh, b: trimesh.Trimesh) -> float:
+    """Return Euclidean separation between two axis-aligned bounding boxes."""
+
+    a_min, a_max = np.asarray(a.bounds, dtype=float)
+    b_min, b_max = np.asarray(b.bounds, dtype=float)
+    gap = np.maximum(0.0, np.maximum(a_min - b_max, b_min - a_max))
+    return float(np.linalg.norm(gap))
+
+
+def cleanup_small_shells(
+    mesh: trimesh.Trimesh,
+    *,
+    min_shell_percent: float = 0.5,
+    proximity_ratio: float = 0.015,
+) -> tuple[trimesh.Trimesh, int]:
+    """Remove tiny, spatially isolated shells while preserving nearby detail.
+
+    A shell below ``min_shell_percent`` of the largest shell is only removed if
+    it is also farther than a small fraction of the model size from every shell
+    already considered significant. This makes the cleanup deliberately
+    conservative: disconnected eyes, hair, shoes or other nearby details are
+    retained, while genuinely floating specks can be discarded.
+    """
+
+    if min_shell_percent <= 0:
+        return mesh.copy(), 0
+
+    try:
+        shells = list(mesh.split(only_watertight=False))
+    except Exception:
+        return mesh.copy(), 0
+
+    if len(shells) <= 1:
+        return mesh.copy(), 0
+
+    scores = np.asarray([_shell_score(shell) for shell in shells], dtype=float)
+    largest = float(scores.max(initial=0.0))
+    if largest <= 0:
+        return mesh.copy(), 0
+
+    threshold = largest * (float(min_shell_percent) / 100.0)
+    kept = {int(i) for i, score in enumerate(scores) if score >= threshold}
+    if not kept:
+        kept.add(int(np.argmax(scores)))
+
+    model_scale = max(float(np.max(mesh.extents)), 1e-6)
+    proximity = max(model_scale * float(proximity_ratio), 1e-6)
+
+    # Grow the keep-set transitively so a tiny detail close to another retained
+    # detail is not discarded merely because it is not close to the largest body.
+    changed = True
+    while changed:
+        changed = False
+        for index, shell in enumerate(shells):
+            if index in kept:
+                continue
+            if any(_aabb_gap(shell, shells[other]) <= proximity for other in kept):
+                kept.add(index)
+                changed = True
+
+    kept_shells = [shell for index, shell in enumerate(shells) if index in kept]
+    removed = len(shells) - len(kept_shells)
+    if removed <= 0:
+        return mesh.copy(), 0
+
+    cleaned = trimesh.util.concatenate(kept_shells)
+    return repair_mesh(cleaned), removed
+
+
+def smooth_mesh(mesh: trimesh.Trimesh, level: str = "off") -> trimesh.Trimesh:
+    """Apply conservative Taubin smoothing without changing mesh topology."""
+
+    key = _normalise_smoothing_level(level)
+    iterations = SMOOTHING_ITERATIONS[key]
+    if iterations <= 0:
+        return mesh.copy()
+
+    smoothed = mesh.copy()
+    try:
+        # Values are intentionally conservative. The pair satisfies Taubin's
+        # shrink/dilate stability relationship while reducing faceting.
+        filter_taubin(smoothed, lamb=0.45, nu=0.47, iterations=iterations)
+    except Exception as exc:
+        raise MeshError(f"Mesh smoothing failed: {exc}") from exc
+
+    vertices = np.asarray(smoothed.vertices, dtype=float)
+    if not np.isfinite(vertices).all():
+        raise MeshError("Mesh smoothing produced invalid vertex coordinates.")
+
+    return repair_mesh(smoothed)
 
 
 def orient_longest_axis_to_z(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, str]:
@@ -125,12 +270,17 @@ def floor_mesh(mesh: trimesh.Trimesh, z: float = 0.0) -> trimesh.Trimesh:
     return mesh
 
 
+def _base_visible_height(height_mm: float, embed_mm: float) -> float:
+    sink = min(max(float(embed_mm), 0.0), float(height_mm) * 0.9)
+    return float(height_mm) - sink
+
+
 def add_round_base(
     mesh: trimesh.Trimesh,
     *,
     height_mm: float = 3.0,
     margin_mm: float = 3.0,
-    embed_mm: float = 0.8,
+    embed_mm: float = DEFAULT_BASE_EMBED_MM,
 ) -> trimesh.Trimesh:
     if height_mm <= 0:
         raise MeshError("Base height must be greater than zero.")
@@ -161,6 +311,8 @@ def prepare_mesh(
     add_base: bool = True,
     base_height_mm: float = 3.0,
     base_margin_mm: float = 3.0,
+    smoothing_level: str = "off",
+    cleanup_min_shell_percent: float = 0.0,
 ) -> tuple[Path, MeshReport]:
     source = Path(source)
     destination = Path(destination)
@@ -171,18 +323,37 @@ def prepare_mesh(
     source_watertight = bool(mesh.is_watertight)
 
     mesh = repair_mesh(mesh)
+    mesh, removed_shells = cleanup_small_shells(
+        mesh,
+        min_shell_percent=float(cleanup_min_shell_percent),
+    )
+    cleaned_shells = _shell_count(mesh)
+    smoothing_key = _normalise_smoothing_level(smoothing_level)
+    mesh = smooth_mesh(mesh, smoothing_key)
     mesh, detected_axis = orient_longest_axis_to_z(mesh)
-    mesh = scale_to_height(mesh, target_height_mm)
+
+    # The user's requested height is the total exported height. When a base is
+    # enabled, reserve the visible part of the base before scaling the figure.
+    figure_height = float(target_height_mm)
+    if add_base:
+        visible_base = _base_visible_height(base_height_mm, DEFAULT_BASE_EMBED_MM)
+        figure_height -= visible_base
+        if figure_height <= 0:
+            raise MeshError("Target height is too small for the selected base height.")
+
+    mesh = scale_to_height(mesh, figure_height)
     mesh = floor_mesh(mesh)
 
     warnings: list[str] = []
     if not source_watertight:
         warnings.append(
-            "The generated source mesh is not watertight. Automatic repair was attempted; inspect the STL before printing."
+            "The generated source mesh is not watertight. Automatic repair was attempted; "
+            "inspect the STL before printing."
         )
-    if source_shells > 1:
+    if cleaned_shells > 1:
         warnings.append(
-            f"The generated source contains {source_shells} disconnected shells. Inspect for floating geometry."
+            f"The prepared source contains {cleaned_shells} disconnected shells after "
+            "conservative cleanup. Inspect for floating geometry."
         )
 
     if add_base:
@@ -198,7 +369,8 @@ def prepare_mesh(
 
     if not final_watertight:
         warnings.append(
-            "Final mesh is not watertight. Do not treat this export as print-ready without slicer/mesh validation."
+            "Final mesh is not watertight. Do not treat this export as print-ready without "
+            "slicer/mesh validation."
         )
 
     winding_consistent = bool(mesh.is_winding_consistent)
@@ -219,6 +391,8 @@ def prepare_mesh(
         vertices=int(len(mesh.vertices)),
         faces=int(len(mesh.faces)),
         source_shells=source_shells,
+        cleaned_shells=cleaned_shells,
+        removed_shells=removed_shells,
         final_shells=final_shells,
         source_watertight=source_watertight,
         final_watertight=final_watertight,
@@ -226,6 +400,8 @@ def prepare_mesh(
         volume_mm3=round(volume, 3) if volume is not None else None,
         base_added=bool(add_base),
         up_axis_detected=detected_axis,
+        smoothing_level=smoothing_key,
+        cleanup_min_shell_percent=float(cleanup_min_shell_percent),
         warnings=warnings,
     )
     return destination, report
