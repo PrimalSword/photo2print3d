@@ -19,6 +19,8 @@ def _generate_from_image(
     base_margin_mm: float,
     mc_resolution: int,
     foreground_ratio: float,
+    smoothing_level: str,
+    cleanup_min_shell_percent: float,
 ):
     if not image_path:
         raise gr.Error("Envie uma imagem de referência primeiro.")
@@ -32,15 +34,19 @@ def _generate_from_image(
             base_margin_mm=float(base_margin_mm),
             mc_resolution=int(mc_resolution),
             foreground_ratio=float(foreground_ratio),
+            smoothing_level=str(smoothing_level),
+            cleanup_min_shell_percent=float(cleanup_min_shell_percent),
         )
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
 
     warnings = result.report.warnings
+    removed = result.report.removed_shells
+    cleanup_note = f" Limpeza removeu {removed} ilha(s) isolada(s)." if removed else ""
     status = (
-        "✅ STL gerado. Abra no slicer e confira a prévia antes de imprimir."
+        f"✅ STL gerado.{cleanup_note} Abra no slicer e confira a prévia antes de imprimir."
         if not warnings
-        else "⚠️ STL gerado com alertas. Leia o relatório antes de imprimir."
+        else f"⚠️ STL gerado com alertas.{cleanup_note} Leia o relatório antes de imprimir."
     )
     return (
         str(result.stl_path),
@@ -56,6 +62,8 @@ def _prepare_existing_mesh(
     add_base: bool,
     base_height_mm: float,
     base_margin_mm: float,
+    smoothing_level: str,
+    cleanup_min_shell_percent: float,
 ):
     if not mesh_path:
         raise gr.Error("Envie uma malha 3D primeiro.")
@@ -74,14 +82,18 @@ def _prepare_existing_mesh(
             add_base=bool(add_base),
             base_height_mm=float(base_height_mm),
             base_margin_mm=float(base_margin_mm),
+            smoothing_level=str(smoothing_level),
+            cleanup_min_shell_percent=float(cleanup_min_shell_percent),
         )
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
 
+    removed = report.removed_shells
+    cleanup_note = f" Limpeza removeu {removed} ilha(s) isolada(s)." if removed else ""
     status = (
-        "✅ Malha preparada. Confira no slicer antes de imprimir."
+        f"✅ Malha preparada.{cleanup_note} Confira no slicer antes de imprimir."
         if not report.warnings
-        else "⚠️ Malha preparada com alertas. Confira o relatório e o slicer."
+        else f"⚠️ Malha preparada com alertas.{cleanup_note} Confira o relatório e o slicer."
     )
     return str(stl_path), str(stl_path), report.to_dict(), status
 
@@ -89,8 +101,10 @@ def _prepare_existing_mesh(
 with gr.Blocks(title=TITLE) as demo:
     gr.Markdown(
         "# Photo2Print3D\n"
-        "**Imagem → reconstrução 3D → escala em mm → base → validação → STL.**\n\n"
-        "MVP local. O objetivo não é só gerar uma malha bonita: é chegar a um arquivo que possa ser inspecionado e fatiado para FDM."
+        "**Imagem → reconstrução 3D → limpeza → suavização → escala em mm → base → "
+        "validação → STL.**\n\n"
+        "MVP local. O objetivo não é só gerar uma malha bonita: é chegar a um arquivo que "
+        "possa ser inspecionado e fatiado para FDM."
     )
 
     with gr.Tab("Foto → STL"):
@@ -103,34 +117,35 @@ with gr.Blocks(title=TITLE) as demo:
                 height = gr.Slider(
                     50,
                     300,
-                    value=120,
+                    value=140,
                     step=1,
-                    label="Altura final (mm)",
+                    label="Altura total final (mm)",
                 )
                 add_base = gr.Checkbox(value=True, label="Adicionar base redonda")
                 with gr.Row():
                     base_height = gr.Slider(
                         1,
                         10,
-                        value=3,
+                        value=4,
                         step=0.5,
                         label="Altura da base (mm)",
                     )
                     base_margin = gr.Slider(
                         0,
                         15,
-                        value=3,
+                        value=5,
                         step=0.5,
                         label="Margem da base (mm)",
                     )
-                with gr.Accordion("Motor 3D", open=False):
+                with gr.Accordion("Motor 3D e acabamento", open=True):
                     gr.Markdown(
-                        "**CPU/baixa memória:** comece em `128`. "
-                        "Suba para `192` ou `256` só depois de validar o primeiro modelo."
+                        "**128 = rápido**, **192 = qualidade recomendada**, "
+                        "**256 = experimental**. Em máquinas com 16 GB de RAM, 192 é o "
+                        "ponto de equilíbrio; 256 pode usar paginação e ficar muito lento."
                     )
                     resolution = gr.Dropdown(
-                        choices=[96, 128, 192, 256, 320, 384],
-                        value=128,
+                        choices=[128, 192, 256],
+                        value=192,
                         label="Marching cubes resolution",
                     )
                     foreground_ratio = gr.Slider(
@@ -139,6 +154,23 @@ with gr.Blocks(title=TITLE) as demo:
                         value=0.85,
                         step=0.01,
                         label="Ocupação do personagem na imagem",
+                    )
+                    smoothing = gr.Dropdown(
+                        choices=["Desligado", "Leve", "Média", "Forte"],
+                        value="Leve",
+                        label="Suavização Taubin",
+                    )
+                    cleanup_percent = gr.Slider(
+                        0.0,
+                        5.0,
+                        value=0.5,
+                        step=0.1,
+                        label="Limpeza conservadora de ilhas (% do maior shell)",
+                    )
+                    gr.Markdown(
+                        "A limpeza só remove componentes **pequenos e espacialmente isolados**. "
+                        "Detalhes pequenos próximos ao personagem são preservados. Use `0` para "
+                        "desligar."
                     )
                 generate_button = gr.Button("Gerar STL", variant="primary")
 
@@ -158,21 +190,54 @@ with gr.Blocks(title=TITLE) as demo:
                 base_margin,
                 resolution,
                 foreground_ratio,
+                smoothing,
+                cleanup_percent,
             ],
             outputs=[model, download, report, status],
         )
 
     with gr.Tab("Malha pronta → STL"):
         gr.Markdown(
-            "Use esta aba quando você já tiver um `.obj`, `.glb`, `.gltf`, `.ply` ou `.stl` e quiser apenas escalar, reparar e adicionar base."
+            "Use esta aba quando você já tiver um `.obj`, `.glb`, `.gltf`, `.ply` ou `.stl` e "
+            "quiser escalar, reparar, suavizar, limpar ilhas e adicionar base."
         )
         with gr.Row():
             with gr.Column():
                 mesh_input = gr.Model3D(label="Malha de entrada")
-                mesh_height = gr.Slider(50, 300, value=120, step=1, label="Altura final (mm)")
+                mesh_height = gr.Slider(
+                    50,
+                    300,
+                    value=120,
+                    step=1,
+                    label="Altura total final (mm)",
+                )
                 mesh_base = gr.Checkbox(value=True, label="Adicionar base redonda")
-                mesh_base_height = gr.Slider(1, 10, value=3, step=0.5, label="Altura da base (mm)")
-                mesh_base_margin = gr.Slider(0, 15, value=3, step=0.5, label="Margem da base (mm)")
+                mesh_base_height = gr.Slider(
+                    1,
+                    10,
+                    value=3,
+                    step=0.5,
+                    label="Altura da base (mm)",
+                )
+                mesh_base_margin = gr.Slider(
+                    0,
+                    15,
+                    value=3,
+                    step=0.5,
+                    label="Margem da base (mm)",
+                )
+                mesh_smoothing = gr.Dropdown(
+                    choices=["Desligado", "Leve", "Média", "Forte"],
+                    value="Desligado",
+                    label="Suavização Taubin",
+                )
+                mesh_cleanup = gr.Slider(
+                    0.0,
+                    5.0,
+                    value=0.0,
+                    step=0.1,
+                    label="Limpeza conservadora de ilhas (% do maior shell)",
+                )
                 prepare_button = gr.Button("Preparar para impressão", variant="primary")
             with gr.Column():
                 prepared_model = gr.Model3D(label="Prévia preparada", height=480)
@@ -188,6 +253,8 @@ with gr.Blocks(title=TITLE) as demo:
                 mesh_base,
                 mesh_base_height,
                 mesh_base_margin,
+                mesh_smoothing,
+                mesh_cleanup,
             ],
             outputs=[
                 prepared_model,
