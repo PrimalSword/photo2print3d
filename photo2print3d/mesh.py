@@ -82,7 +82,6 @@ def _normalise_smoothing_level(level: str) -> str:
 def repair_mesh(mesh: trimesh.Trimesh) -> trimesh.Trimesh:
     mesh = mesh.copy()
 
-    # Trimesh's validation process removes common duplicate/degenerate data.
     try:
         mesh.process(validate=True)
     except Exception:
@@ -152,14 +151,7 @@ def cleanup_small_shells(
     min_shell_percent: float = 0.5,
     proximity_ratio: float = 0.015,
 ) -> tuple[trimesh.Trimesh, int]:
-    """Remove tiny, spatially isolated shells while preserving nearby detail.
-
-    A shell below ``min_shell_percent`` of the largest shell is only removed if
-    it is also farther than a small fraction of the model size from every shell
-    already considered significant. This makes the cleanup deliberately
-    conservative: disconnected eyes, hair, shoes or other nearby details are
-    retained, while genuinely floating specks can be discarded.
-    """
+    """Remove tiny, spatially isolated shells while preserving nearby detail."""
 
     if min_shell_percent <= 0:
         return mesh.copy(), 0
@@ -185,8 +177,6 @@ def cleanup_small_shells(
     model_scale = max(float(np.max(mesh.extents)), 1e-6)
     proximity = max(model_scale * float(proximity_ratio), 1e-6)
 
-    # Grow the keep-set transitively so a tiny detail close to another retained
-    # detail is not discarded merely because it is not close to the largest body.
     changed = True
     while changed:
         changed = False
@@ -216,8 +206,6 @@ def smooth_mesh(mesh: trimesh.Trimesh, level: str = "off") -> trimesh.Trimesh:
 
     smoothed = mesh.copy()
     try:
-        # Values are intentionally conservative. The pair satisfies Taubin's
-        # shrink/dilate stability relationship while reducing faceting.
         filter_taubin(smoothed, lamb=0.45, nu=0.47, iterations=iterations)
     except Exception as exc:
         raise MeshError(f"Mesh smoothing failed: {exc}") from exc
@@ -227,6 +215,21 @@ def smooth_mesh(mesh: trimesh.Trimesh, level: str = "off") -> trimesh.Trimesh:
         raise MeshError("Mesh smoothing produced invalid vertex coordinates.")
 
     return repair_mesh(smoothed)
+
+
+def _export_stage(
+    mesh: trimesh.Trimesh,
+    artifacts_dir: str | Path | None,
+    filename: str,
+) -> Path | None:
+    if artifacts_dir is None:
+        return None
+
+    directory = Path(artifacts_dir)
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / filename
+    mesh.export(str(path), file_type="obj")
+    return path
 
 
 def orient_longest_axis_to_z(mesh: trimesh.Trimesh) -> tuple[trimesh.Trimesh, str]:
@@ -294,9 +297,6 @@ def add_round_base(
     base = trimesh.creation.cylinder(radius=radius, height=height_mm, sections=96)
     base.apply_translation([0.0, 0.0, height_mm / 2.0])
 
-    # Sink the feet slightly into the closed base. We deliberately keep the base
-    # as an overlapping closed shell in the MVP; slicers generally resolve this,
-    # while a future Blender backend will perform a true remeshed union.
     sink = min(max(float(embed_mm), 0.0), height_mm * 0.9)
     mesh.apply_translation([0.0, 0.0, height_mm - sink])
 
@@ -313,6 +313,7 @@ def prepare_mesh(
     base_margin_mm: float = 3.0,
     smoothing_level: str = "off",
     cleanup_min_shell_percent: float = 0.0,
+    artifacts_dir: str | Path | None = None,
 ) -> tuple[Path, MeshReport]:
     source = Path(source)
     destination = Path(destination)
@@ -328,12 +329,14 @@ def prepare_mesh(
         min_shell_percent=float(cleanup_min_shell_percent),
     )
     cleaned_shells = _shell_count(mesh)
+    _export_stage(mesh, artifacts_dir, "cleaned-source.obj")
+
     smoothing_key = _normalise_smoothing_level(smoothing_level)
     mesh = smooth_mesh(mesh, smoothing_key)
+    _export_stage(mesh, artifacts_dir, "smoothed-source.obj")
+
     mesh, detected_axis = orient_longest_axis_to_z(mesh)
 
-    # The user's requested height is the total exported height. When a base is
-    # enabled, reserve the visible part of the base before scaling the figure.
     figure_height = float(target_height_mm)
     if add_base:
         visible_base = _base_visible_height(base_height_mm, DEFAULT_BASE_EMBED_MM)

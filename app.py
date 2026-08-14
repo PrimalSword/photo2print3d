@@ -5,10 +5,18 @@ from pathlib import Path
 import gradio as gr
 
 from photo2print3d.config import Settings
-from photo2print3d.mesh import prepare_mesh
-from photo2print3d.pipeline import generate_printable_model
+from photo2print3d.mesh import MeshReport, prepare_mesh
+from photo2print3d.pipeline import finish_reconstruction, generate_printable_model
 
-TITLE = "Photo2Print3D"
+TITLE = "Photo2Print3D V3"
+
+
+def _finish_status(report: MeshReport, *, prefix: str) -> str:
+    removed = report.removed_shells
+    cleanup_note = f" Limpeza removeu {removed} ilha(s) isolada(s)." if removed else ""
+    if report.warnings:
+        return f"⚠️ {prefix}.{cleanup_note} Leia o relatório e confira no slicer."
+    return f"✅ {prefix}.{cleanup_note} Abra no slicer e confira a prévia antes de imprimir."
 
 
 def _generate_from_image(
@@ -40,19 +48,62 @@ def _generate_from_image(
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
 
-    warnings = result.report.warnings
-    removed = result.report.removed_shells
-    cleanup_note = f" Limpeza removeu {removed} ilha(s) isolada(s)." if removed else ""
+    if result.cache_hit:
+        cache_note = (
+            "♻️ **Cache V3:** a reconstrução 3D já existia; o TripoSR não rodou novamente. "
+        )
+    else:
+        cache_note = "🧠 **Cache V3:** reconstrução nova salva para reutilização. "
+
+    status = cache_note + _finish_status(result.report, prefix="STL gerado")
+    return (
+        str(result.stl_path),
+        str(result.stl_path),
+        result.report.to_dict(),
+        status,
+        str(result.raw_mesh_path),
+        str(result.raw_mesh_path),
+        str(result.cleaned_mesh_path),
+        str(result.smoothed_mesh_path),
+    )
+
+
+def _reprocess_cached(
+    raw_mesh_path: str | None,
+    height_mm: float,
+    add_base: bool,
+    base_height_mm: float,
+    base_margin_mm: float,
+    smoothing_level: str,
+    cleanup_min_shell_percent: float,
+):
+    if not raw_mesh_path:
+        raise gr.Error("Gere uma reconstrução 3D primeiro.")
+
+    try:
+        result = finish_reconstruction(
+            raw_mesh_path,
+            target_height_mm=float(height_mm),
+            add_base=bool(add_base),
+            base_height_mm=float(base_height_mm),
+            base_margin_mm=float(base_margin_mm),
+            smoothing_level=str(smoothing_level),
+            cleanup_min_shell_percent=float(cleanup_min_shell_percent),
+        )
+    except Exception as exc:
+        raise gr.Error(str(exc)) from exc
+
     status = (
-        f"✅ STL gerado.{cleanup_note} Abra no slicer e confira a prévia antes de imprimir."
-        if not warnings
-        else f"⚠️ STL gerado com alertas.{cleanup_note} Leia o relatório antes de imprimir."
+        "⚡ **Reprocessamento rápido:** TripoSR não foi executado. "
+        + _finish_status(result.report, prefix="Acabamento atualizado")
     )
     return (
         str(result.stl_path),
         str(result.stl_path),
         result.report.to_dict(),
         status,
+        str(result.cleaned_mesh_path),
+        str(result.smoothed_mesh_path),
     )
 
 
@@ -71,6 +122,7 @@ def _prepare_existing_mesh(
     settings = Settings.from_env()
     settings.ensure_runtime_dirs()
     output_dir = settings.work_dir / "manual-prepare"
+    artifacts_dir = output_dir / "artifacts"
     output_dir.mkdir(parents=True, exist_ok=True)
     output_path = output_dir / f"{Path(mesh_path).stem}-print.stl"
 
@@ -84,36 +136,31 @@ def _prepare_existing_mesh(
             base_margin_mm=float(base_margin_mm),
             smoothing_level=str(smoothing_level),
             cleanup_min_shell_percent=float(cleanup_min_shell_percent),
+            artifacts_dir=artifacts_dir,
         )
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
 
-    removed = report.removed_shells
-    cleanup_note = f" Limpeza removeu {removed} ilha(s) isolada(s)." if removed else ""
-    status = (
-        f"✅ Malha preparada.{cleanup_note} Confira no slicer antes de imprimir."
-        if not report.warnings
-        else f"⚠️ Malha preparada com alertas.{cleanup_note} Confira o relatório e o slicer."
-    )
+    status = _finish_status(report, prefix="Malha preparada")
     return str(stl_path), str(stl_path), report.to_dict(), status
 
 
 with gr.Blocks(title=TITLE) as demo:
+    raw_mesh_state = gr.State(value=None)
+
     gr.Markdown(
-        "# Photo2Print3D\n"
-        "**Imagem → reconstrução 3D → limpeza → suavização → escala em mm → base → "
-        "validação → STL.**\n\n"
-        "MVP local. O objetivo não é só gerar uma malha bonita: é chegar a um arquivo que "
-        "possa ser inspecionado e fatiado para FDM."
+        "# Photo2Print3D V3\n"
+        "**Imagem → reconstrução 3D cacheada → limpeza → suavização → escala em mm → "
+        "base → validação → STL.**\n\n"
+        "A reconstrução pesada agora é reaproveitada. Depois do primeiro processamento, você "
+        "pode testar suavização, base, limpeza e altura sem fazer o Xeon reconstruir o cidadão "
+        "do zero toda vez."
     )
 
     with gr.Tab("Foto → STL"):
         with gr.Row():
             with gr.Column(scale=1):
-                image = gr.Image(
-                    type="filepath",
-                    label="Imagem de referência",
-                )
+                image = gr.Image(type="filepath", label="Imagem de referência")
                 height = gr.Slider(
                     50,
                     300,
@@ -137,16 +184,16 @@ with gr.Blocks(title=TITLE) as demo:
                         step=0.5,
                         label="Margem da base (mm)",
                     )
-                with gr.Accordion("Motor 3D e acabamento", open=True):
-                    gr.Markdown(
-                        "**128 = rápido**, **192 = qualidade recomendada**, "
-                        "**256 = experimental**. Em máquinas com 16 GB de RAM, 192 é o "
-                        "ponto de equilíbrio; 256 pode usar paginação e ficar muito lento."
-                    )
+
+                with gr.Accordion("Reconstrução 3D", open=True):
                     resolution = gr.Dropdown(
-                        choices=[128, 192, 256],
+                        choices=[
+                            ("Rápido — 128", 128),
+                            ("Recomendado — 192", 192),
+                            ("Experimental — 256", 256),
+                        ],
                         value=192,
-                        label="Marching cubes resolution",
+                        label="Perfil de reconstrução",
                     )
                     foreground_ratio = gr.Slider(
                         0.55,
@@ -155,9 +202,16 @@ with gr.Blocks(title=TITLE) as demo:
                         step=0.01,
                         label="Ocupação do personagem na imagem",
                     )
+                    gr.Markdown(
+                        "Alterar **perfil de reconstrução** ou **ocupação** exige reconstruir. "
+                        "Se imagem + esses dois parâmetros forem iguais a um processamento "
+                        "anterior, a V3 recupera a malha do cache automaticamente."
+                    )
+
+                with gr.Accordion("Acabamento", open=True):
                     smoothing = gr.Dropdown(
                         choices=["Desligado", "Leve", "Média", "Forte"],
-                        value="Leve",
+                        value="Média",
                         label="Suavização Taubin",
                     )
                     cleanup_percent = gr.Slider(
@@ -168,17 +222,26 @@ with gr.Blocks(title=TITLE) as demo:
                         label="Limpeza conservadora de ilhas (% do maior shell)",
                     )
                     gr.Markdown(
-                        "A limpeza só remove componentes **pequenos e espacialmente isolados**. "
-                        "Detalhes pequenos próximos ao personagem são preservados. Use `0` para "
-                        "desligar."
+                        "Suavização, limpeza, altura e base podem ser alteradas com "
+                        "**Reprocessar acabamento**, sem rodar o TripoSR novamente."
                     )
-                generate_button = gr.Button("Gerar STL", variant="primary")
+
+                generate_button = gr.Button("Reconstruir + gerar STL", variant="primary")
+                reprocess_button = gr.Button("⚡ Reprocessar acabamento sem reconstruir")
 
             with gr.Column(scale=1):
                 model = gr.Model3D(label="Prévia 3D", height=480)
                 download = gr.File(label="Baixar STL")
                 status = gr.Markdown()
                 report = gr.JSON(label="Relatório de imprimibilidade")
+
+                with gr.Accordion("Arquivos técnicos V3", open=False):
+                    gr.Markdown(
+                        "Arquivos intermediários para comparação, diagnóstico ou edição externa."
+                    )
+                    raw_download = gr.File(label="Malha bruta do TripoSR (OBJ)")
+                    cleaned_download = gr.File(label="Após limpeza conservadora (OBJ)")
+                    smoothed_download = gr.File(label="Após suavização (OBJ)")
 
         generate_button.click(
             fn=_generate_from_image,
@@ -193,7 +256,37 @@ with gr.Blocks(title=TITLE) as demo:
                 smoothing,
                 cleanup_percent,
             ],
-            outputs=[model, download, report, status],
+            outputs=[
+                model,
+                download,
+                report,
+                status,
+                raw_mesh_state,
+                raw_download,
+                cleaned_download,
+                smoothed_download,
+            ],
+        )
+
+        reprocess_button.click(
+            fn=_reprocess_cached,
+            inputs=[
+                raw_mesh_state,
+                height,
+                add_base,
+                base_height,
+                base_margin,
+                smoothing,
+                cleanup_percent,
+            ],
+            outputs=[
+                model,
+                download,
+                report,
+                status,
+                cleaned_download,
+                smoothed_download,
+            ],
         )
 
     with gr.Tab("Malha pronta → STL"):
