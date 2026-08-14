@@ -5,13 +5,13 @@ Photo2Print3D is an experimental local-first pipeline that turns a single refere
 The project is intentionally split into two layers:
 
 1. **3D reconstruction engine** — replaceable. The first adapter targets the official TripoSR project.
-2. **Printability pipeline** — our code. It scales in millimetres, repairs simple mesh defects, adds a printable base, validates the result and exports STL.
+2. **Printability pipeline** — our code. It repairs simple defects, removes conservative floating geometry, optionally smooths the mesh, scales it in millimetres, adds a printable base, validates the result and exports STL.
 
 The immediate MVP is deliberately narrow: **image in → printable STL out**.
 
 ## Status
 
-Early MVP. The geometry generator and post-processing pipeline are usable from a local Gradio interface, but generated meshes still need visual inspection before printing.
+V2 MVP. The geometry generator and post-processing pipeline are usable from a local Gradio interface. Generated meshes still need visual inspection before printing, but the post-processing layer now includes conservative shell cleanup, Taubin smoothing and exact total-height sizing.
 
 ## Quick start
 
@@ -66,7 +66,7 @@ The easiest supported integration is to clone the official TripoSR repository in
 .\scripts\setup_cpu_windows.ps1
 ```
 
-This installs the CPU build of PyTorch, sets `TRIPOSR_DEVICE=cpu` for the current PowerShell session, and then installs the TripoSR dependencies. Keep the same PowerShell window open when launching the app.
+The Windows setup installs a known-compatible Gradio/Transformers/Hugging Face stack, ONNX Runtime for `rembg`, the CPU marching-cubes compatibility layer and then validates the environment with `pip check`.
 
 Linux/macOS:
 
@@ -74,7 +74,7 @@ Linux/macOS:
 bash scripts/setup_triposr.sh
 ```
 
-> TripoSR's official README states that the default single-image GPU run takes about 6 GB of VRAM. CPU fallback exists, but it will be much slower. For CPU/low-memory first runs, start with marching-cubes resolution `128`, validate the geometry, and only then try `192` or `256`.
+> TripoSR's official README states that the default single-image GPU run takes about 6 GB of VRAM. On a 16 GB CPU-only workstation, resolution `192` is the recommended quality preset after a successful first run. Resolution `256` is experimental and can force heavy paging; `128` remains the fast/low-memory option.
 
 ### 5. Launch the app
 
@@ -84,7 +84,23 @@ python app.py
 
 Open the local Gradio URL shown in the terminal.
 
-## How the MVP works
+## V2 quality controls
+
+The image workflow exposes three reconstruction presets through marching-cubes resolution:
+
+- `128` — fast / low memory;
+- `192` — recommended quality balance;
+- `256` — experimental / high memory.
+
+Post-processing adds:
+
+- **Taubin smoothing** — Off, Light, Medium or Strong. Light is the default for generated meshes and reduces the faceted look without changing topology.
+- **Conservative island cleanup** — tiny components are only removed when they are both small relative to the largest shell and spatially isolated. Nearby details such as hair, eyes, shoes or accessories are deliberately preserved.
+- **Exact total height** — the requested final height includes the visible base instead of adding the base on top of the requested figure height.
+
+For imported meshes, smoothing and shell cleanup default to Off so existing geometry is not modified unexpectedly.
+
+## How the V2 pipeline works
 
 ```text
 reference image
@@ -95,9 +111,13 @@ TripoSR adapter
       ↓
 raw OBJ mesh
       ↓
-mesh repair + cleanup
+repair
       ↓
-scale to target height (mm)
+conservative floating-shell cleanup
+      ↓
+optional Taubin smoothing
+      ↓
+orientation + exact total-height scaling
       ↓
 optional circular base
       ↓
@@ -122,20 +142,24 @@ photo2print3d generate reference.png --height-mm 120 --base --output output.stl
 
 ## Current printability checks
 
-The MVP reports:
+The report includes:
 
 - mesh bounds and final dimensions in millimetres;
-- number of connected bodies;
-- watertight status;
+- source shell count;
+- shell count after conservative cleanup;
+- number of removed isolated shells;
+- final connected-body count;
+- source and final watertight status;
 - winding consistency;
 - volume when available;
+- selected smoothing level and cleanup threshold;
 - whether a base was added.
 
-It also attempts conservative hole filling and normal repair. A `watertight: false` report is a hard warning: inspect or repair the mesh before sending it to the slicer.
+It also attempts conservative hole filling and normal repair. A `final_watertight: false` report is a hard warning: inspect or repair the mesh before sending it to the slicer.
 
 ## Roadmap
 
-- Blender headless repair backend for robust voxel remeshing;
+- Blender headless repair backend for robust voxel remeshing / true boolean base union;
 - automatic support-risk analysis;
 - minimum-thickness analysis;
 - selectable base styles and engraved names;
