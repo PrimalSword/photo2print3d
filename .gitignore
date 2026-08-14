@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.DS_Store
+Thumbs.db
+
+# Local model/runtime data
+vendor/
+work/
+outputs/
+*.stl
+*.obj
+*.glb
+*.gltf
+*.ply
+
+# IDE
+.vscode/
+.idea/
