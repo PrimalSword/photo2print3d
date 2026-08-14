@@ -42,9 +42,17 @@ python -m pip install --upgrade pip
 pip install -e .
 ```
 
-### 3. Install TripoSR
+### 3. Run the hardware/runtime doctor
 
-The easiest supported integration is to clone the official TripoSR repository next to this project and point `TRIPOSR_DIR` to it.
+```bash
+photo2print3d doctor
+```
+
+This reports the active Python executable, NVIDIA GPU/VRAM when available, PyTorch/CUDA status and whether TripoSR is installed in the expected location.
+
+### 4. Install TripoSR
+
+The easiest supported integration is to clone the official TripoSR repository into `vendor/TripoSR`.
 
 Windows PowerShell:
 
@@ -60,7 +68,7 @@ bash scripts/setup_triposr.sh
 
 > TripoSR's official README currently states that the default single-image run needs about 6 GB of VRAM. CPU fallback exists, but it will be much slower.
 
-### 4. Launch the app
+### 5. Launch the app
 
 ```bash
 python app.py
@@ -124,6 +132,7 @@ It also attempts conservative hole filling and normal repair. A `watertight: fal
 - minimum-thickness analysis;
 - selectable base styles and engraved names;
 - head/ear caricature controls;
+- Stable Fast 3D / newer reconstruction adapters;
 - multi-view reconstruction adapters;
 - 3MF export with print metadata;
 - GPU worker/service mode.
