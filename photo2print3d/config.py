@@ -12,6 +12,14 @@ def _resolve_path(value: str | None, default: Path) -> Path:
     return Path(value).expanduser().resolve() if value else default.resolve()
 
 
+def _default_device() -> str:
+    try:
+        import torch
+    except ModuleNotFoundError:
+        return "cpu"
+    return "cuda:0" if torch.cuda.is_available() else "cpu"
+
+
 @dataclass(frozen=True)
 class Settings:
     """Runtime paths and generator defaults."""
@@ -29,7 +37,7 @@ class Settings:
             triposr_dir=_resolve_path(
                 os.getenv("TRIPOSR_DIR"), PROJECT_ROOT / "vendor" / "TripoSR"
             ),
-            triposr_device=os.getenv("TRIPOSR_DEVICE", "cuda:0"),
+            triposr_device=os.getenv("TRIPOSR_DEVICE", _default_device()),
         )
 
     def ensure_runtime_dirs(self) -> None:
