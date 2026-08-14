@@ -25,8 +25,10 @@ def generate_printable_model(
     add_base: bool = True,
     base_height_mm: float = 3.0,
     base_margin_mm: float = 3.0,
-    mc_resolution: int = 256,
+    mc_resolution: int = 192,
     foreground_ratio: float = 0.85,
+    smoothing_level: str = "light",
+    cleanup_min_shell_percent: float = 0.5,
     settings: Settings | None = None,
 ) -> PipelineResult:
     settings = settings or Settings.from_env()
@@ -60,6 +62,8 @@ def generate_printable_model(
         add_base=add_base,
         base_height_mm=base_height_mm,
         base_margin_mm=base_margin_mm,
+        smoothing_level=smoothing_level,
+        cleanup_min_shell_percent=cleanup_min_shell_percent,
     )
 
     return PipelineResult(
