@@ -11,7 +11,9 @@ The immediate MVP is deliberately narrow: **image in → printable STL out**.
 
 ## Status
 
-V2 MVP. The geometry generator and post-processing pipeline are usable from a local Gradio interface. Generated meshes still need visual inspection before printing, but the post-processing layer now includes conservative shell cleanup, Taubin smoothing and exact total-height sizing.
+V3 MVP. The heavy single-image reconstruction is now content-addressed and cached locally. Once a raw TripoSR mesh exists, height, base, shell cleanup and Taubin smoothing can be reprocessed without invoking TripoSR again.
+
+Generated meshes still require slicer inspection before printing.
 
 ## Quick start
 
@@ -74,7 +76,7 @@ Linux/macOS:
 bash scripts/setup_triposr.sh
 ```
 
-> TripoSR's official README states that the default single-image GPU run takes about 6 GB of VRAM. On a 16 GB CPU-only workstation, resolution `192` is the recommended quality preset after a successful first run. Resolution `256` is experimental and can force heavy paging; `128` remains the fast/low-memory option.
+> On a 16 GB CPU-only workstation, resolution `192` is the recommended quality preset. Resolution `256` is experimental and can force heavy paging; `128` remains the fast/low-memory option.
 
 ### 5. Launch the app
 
@@ -84,38 +86,67 @@ python app.py
 
 Open the local Gradio URL shown in the terminal.
 
-## V2 quality controls
+## V3 workflow
 
-The image workflow exposes three reconstruction presets through marching-cubes resolution:
+The image tab now separates **reconstruction** from **finishing**.
 
-- `128` — fast / low memory;
-- `192` — recommended quality balance;
-- `256` — experimental / high memory.
+### Reconstruction controls
 
-Post-processing adds:
+- **Rápido — 128** — lower memory / faster iteration;
+- **Recomendado — 192** — default quality balance;
+- **Experimental — 256** — high memory use;
+- **foreground occupancy** — controls how much of the TripoSR input frame is occupied by the subject.
 
-- **Taubin smoothing** — Off, Light, Medium or Strong. Light is the default for generated meshes and reduces the faceted look without changing topology.
-- **Conservative island cleanup** — tiny components are only removed when they are both small relative to the largest shell and spatially isolated. Nearby details such as hair, eyes, shoes or accessories are deliberately preserved.
-- **Exact total height** — the requested final height includes the visible base instead of adding the base on top of the requested figure height.
+A reconstruction cache key is derived from the prepared image, marching-cubes resolution, foreground ratio and a cache schema version. Repeating the same reconstruction reuses the cached raw OBJ even after restarting the app.
 
-For imported meshes, smoothing and shell cleanup default to Off so existing geometry is not modified unexpectedly.
+Cached geometry lives under:
 
-## How the V2 pipeline works
+```text
+work/cache/reconstructions/<sha256>/
+```
+
+### Finishing controls
+
+- **Taubin smoothing** — Off, Light, Medium or Strong. Medium is the V3 default for generated meshes based on the current FDM test workflow;
+- **Conservative island cleanup** — removes only tiny components that are both small and spatially isolated;
+- **Exact total height** — the chosen height includes the visible base;
+- **Base height / margin** — can be changed without reconstructing the image.
+
+After the first reconstruction, use **Reprocessar acabamento sem reconstruir** to change smoothing, cleanup, total height or base. This runs only the lightweight mesh pipeline.
+
+### Technical artifacts
+
+Every generated result exposes:
+
+- raw TripoSR OBJ;
+- OBJ after conservative shell cleanup;
+- OBJ after Taubin smoothing;
+- final STL.
+
+These artifacts make A/B comparison and external Blender/mesh-editor inspection easier.
+
+## How the V3 pipeline works
 
 ```text
 reference image
       ↓
 image preparation
       ↓
-TripoSR adapter
+content-addressed reconstruction cache
+      ↓ (cache miss only)
+TripoSR
       ↓
-raw OBJ mesh
+raw OBJ
       ↓
 repair
       ↓
 conservative floating-shell cleanup
       ↓
-optional Taubin smoothing
+cleaned-source.obj
+      ↓
+Taubin smoothing
+      ↓
+smoothed-source.obj
       ↓
 orientation + exact total-height scaling
       ↓
@@ -125,6 +156,8 @@ printability report
       ↓
 STL
 ```
+
+Changing only finishing parameters starts from the cached raw OBJ and skips every step above it.
 
 ## CLI
 
@@ -163,7 +196,7 @@ It also attempts conservative hole filling and normal repair. A `final_watertigh
 - automatic support-risk analysis;
 - minimum-thickness analysis;
 - selectable base styles and engraved names;
-- head/ear caricature controls;
+- bust / full-figure workflow presets;
 - Stable Fast 3D / newer reconstruction adapters;
 - multi-view reconstruction adapters;
 - 3MF export with print metadata;
