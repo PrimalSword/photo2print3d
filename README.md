@@ -54,11 +54,19 @@ This reports the active Python executable, NVIDIA GPU/VRAM when available, PyTor
 
 The easiest supported integration is to clone the official TripoSR repository into `vendor/TripoSR`.
 
-Windows PowerShell:
+#### Windows with NVIDIA/CUDA configured
 
 ```powershell
 .\scripts\setup_triposr.ps1
 ```
+
+#### Windows CPU / unsupported or low-memory GPU
+
+```powershell
+.\scripts\setup_cpu_windows.ps1
+```
+
+This installs the CPU build of PyTorch, sets `TRIPOSR_DEVICE=cpu` for the current PowerShell session, and then installs the TripoSR dependencies. Keep the same PowerShell window open when launching the app.
 
 Linux/macOS:
 
@@ -66,7 +74,7 @@ Linux/macOS:
 bash scripts/setup_triposr.sh
 ```
 
-> TripoSR's official README currently states that the default single-image run needs about 6 GB of VRAM. CPU fallback exists, but it will be much slower.
+> TripoSR's official README states that the default single-image GPU run takes about 6 GB of VRAM. CPU fallback exists, but it will be much slower. For CPU/low-memory first runs, start with marching-cubes resolution `128`, validate the geometry, and only then try `192` or `256`.
 
 ### 5. Launch the app
 
