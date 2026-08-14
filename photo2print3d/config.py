@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
+import os
 from pathlib import Path
 
 
@@ -21,7 +21,7 @@ class Settings:
     triposr_device: str
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls) -> Settings:
         return cls(
             work_dir=_resolve_path(
                 os.getenv("PHOTO2PRINT3D_WORKDIR"), PROJECT_ROOT / "work"
