@@ -3,8 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import typer
 from rich.console import Console
+import typer
 
 from .mesh import prepare_mesh
 from .pipeline import generate_printable_model
