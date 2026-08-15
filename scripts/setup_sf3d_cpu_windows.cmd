@@ -63,7 +63,8 @@ if errorlevel 1 exit /b 1
 
 pushd "%SF3D_DIR%"
 echo [7/7] Instalando dependencias oficiais do SF3D. Esta etapa pode demorar e compilar extensoes C++...
-"%PY%" -m pip install -r requirements-photo2print3d-cpu.txt
+echo       Build isolation desativado de proposito: texture_baker importa torch no setup.py.
+"%PY%" -m pip install --no-build-isolation -r requirements-photo2print3d-cpu.txt
 if errorlevel 1 (
   popd
   echo [ERRO] A instalacao do SF3D falhou. Veja as ultimas linhas acima.
