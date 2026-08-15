@@ -8,7 +8,7 @@ from photo2print3d.config import Settings
 from photo2print3d.mesh import MeshReport, prepare_mesh
 from photo2print3d.pipeline import finish_reconstruction, generate_printable_model
 
-TITLE = "Photo2Print3D V4"
+TITLE = "Photo2Print3D V5"
 
 
 def _finish_status(report: MeshReport, *, prefix: str) -> str:
@@ -31,14 +31,20 @@ def _finish_status(report: MeshReport, *, prefix: str) -> str:
     )
 
 
+def _engine_label(engine: str) -> str:
+    return "Stable Fast 3D" if str(engine) == "sf3d" else "TripoSR"
+
+
 def _generate_from_image(
     image_path: str | None,
+    engine: str,
     height_mm: float,
     add_base: bool,
     base_height_mm: float,
     base_margin_mm: float,
     mc_resolution: int,
     foreground_ratio: float,
+    sf3d_texture_resolution: int,
     refinement_passes: int,
     smoothing_level: str,
     cleanup_min_shell_percent: float,
@@ -49,12 +55,14 @@ def _generate_from_image(
     try:
         result = generate_printable_model(
             image_path,
+            engine=str(engine),
             target_height_mm=float(height_mm),
             add_base=bool(add_base),
             base_height_mm=float(base_height_mm),
             base_margin_mm=float(base_margin_mm),
             mc_resolution=int(mc_resolution),
             foreground_ratio=float(foreground_ratio),
+            sf3d_texture_resolution=int(sf3d_texture_resolution),
             refinement_passes=int(refinement_passes),
             smoothing_level=str(smoothing_level),
             cleanup_min_shell_percent=float(cleanup_min_shell_percent),
@@ -62,10 +70,13 @@ def _generate_from_image(
     except Exception as exc:
         raise gr.Error(str(exc)) from exc
 
+    engine_name = _engine_label(result.engine)
     if result.cache_hit:
-        cache_note = "♻️ **Cache:** a reconstrução 3D já existia; o TripoSR não rodou novamente. "
+        cache_note = (
+            f"♻️ **Cache {engine_name}:** a reconstrução já existia; o motor não rodou novamente. "
+        )
     else:
-        cache_note = "🧠 **Cache:** reconstrução nova salva para reutilização. "
+        cache_note = f"🧠 **{engine_name}:** reconstrução nova salva no cache. "
 
     status = cache_note + _finish_status(result.report, prefix="STL gerado")
     return (
@@ -109,7 +120,7 @@ def _reprocess_cached(
         raise gr.Error(str(exc)) from exc
 
     status = (
-        "⚡ **Reprocessamento rápido:** TripoSR não foi executado. "
+        "⚡ **Reprocessamento rápido:** nenhum motor 3D foi executado. "
         + _finish_status(result.report, prefix="Acabamento atualizado")
     )
     return (
@@ -167,17 +178,59 @@ with gr.Blocks(title=TITLE) as demo:
     raw_mesh_state = gr.State(value=None)
 
     gr.Markdown(
-        "# Photo2Print3D V4\n"
-        "**Imagem → reconstrução 3D cacheada → limpeza → refino de superfície → suavização → "
-        "escala em mm → base → validação → STL.**\n\n"
-        "A V4 cria geometria intermediária antes da suavização. Assim o acabamento deixa de "
-        "apenas empurrar os mesmos vértices grossos e passa a ter mais pontos para formar curvas."
+        "# Photo2Print3D V5\n"
+        "**Agora com dois motores 3D: Stable Fast 3D para o teste de qualidade e TripoSR como "
+        "backend legado.**\n\n"
+        "A V5 muda a fonte da geometria em vez de continuar polindo a mesma reconstrução ruim. "
+        "Stable Fast 3D roda em um ambiente Python isolado para não quebrar as dependências do app."
     )
 
     with gr.Tab("Foto → STL"):
         with gr.Row():
             with gr.Column(scale=1):
                 image = gr.Image(type="filepath", label="Imagem de referência")
+
+                with gr.Accordion("Motor 3D", open=True):
+                    engine = gr.Dropdown(
+                        choices=[
+                            ("Stable Fast 3D — novo / qualidade", "sf3d"),
+                            ("TripoSR — legado", "triposr"),
+                        ],
+                        value="sf3d",
+                        label="Motor de reconstrução",
+                    )
+                    foreground_ratio = gr.Slider(
+                        0.55,
+                        0.95,
+                        value=0.85,
+                        step=0.01,
+                        label="Ocupação do personagem na imagem",
+                    )
+                    resolution = gr.Dropdown(
+                        choices=[
+                            ("128 — rápido", 128),
+                            ("192 — recomendado", 192),
+                            ("256 — experimental", 256),
+                        ],
+                        value=192,
+                        label="TripoSR: resolução (ignorada pelo SF3D)",
+                    )
+                    sf3d_texture = gr.Dropdown(
+                        choices=[
+                            ("256 — CPU / teste", 256),
+                            ("512", 512),
+                            ("1024 — padrão oficial / mais pesado", 1024),
+                        ],
+                        value=256,
+                        label="SF3D: resolução de textura/bake",
+                    )
+                    gr.Markdown(
+                        "O **SF3D** usa modelo gated do Hugging Face e, no Windows, suporte "
+                        "experimental. Para este PC o backend é forçado para CPU. A resolução "
+                        "de textura não aumenta a geometria do STL; 256 reduz trabalho desnecessário "
+                        "no primeiro teste."
+                    )
+
                 height = gr.Slider(
                     50,
                     300,
@@ -185,7 +238,10 @@ with gr.Blocks(title=TITLE) as demo:
                     step=1,
                     label="Altura total final (mm)",
                 )
-                add_base = gr.Checkbox(value=True, label="Adicionar base redonda")
+                add_base = gr.Checkbox(
+                    value=False,
+                    label="Adicionar base redonda (desligada no teste V5)",
+                )
                 with gr.Row():
                     base_height = gr.Slider(
                         1,
@@ -201,42 +257,24 @@ with gr.Blocks(title=TITLE) as demo:
                         step=0.5,
                         label="Margem da base (mm)",
                     )
+                gr.Markdown(
+                    "**Nesta rodada deixe a base desligada.** O sistema atual ainda concatena a "
+                    "base como outro shell; primeiro vamos decidir se a geometria do novo motor vale a pena."
+                )
 
-                with gr.Accordion("Reconstrução 3D", open=True):
-                    resolution = gr.Dropdown(
-                        choices=[
-                            ("Rápido — 128", 128),
-                            ("Recomendado — 192", 192),
-                            ("Experimental — 256", 256),
-                        ],
-                        value=192,
-                        label="Perfil de reconstrução",
-                    )
-                    foreground_ratio = gr.Slider(
-                        0.55,
-                        0.95,
-                        value=0.85,
-                        step=0.01,
-                        label="Ocupação do personagem na imagem",
-                    )
-                    gr.Markdown(
-                        "Alterar **perfil de reconstrução** ou **ocupação** exige reconstruir. "
-                        "A mesma imagem + esses parâmetros reaproveita o cache."
-                    )
-
-                with gr.Accordion("Acabamento V4", open=True):
+                with gr.Accordion("Acabamento", open=True):
                     refinement = gr.Dropdown(
                         choices=[
-                            ("Desligado — malha original", 0),
-                            ("1x — recomendado (≈ 4× faces)", 1),
-                            ("2x — experimental (≈ 16× faces)", 2),
+                            ("Desligado — recomendado para avaliar o SF3D", 0),
+                            ("1x — ≈ 4× faces", 1),
+                            ("2x — experimental", 2),
                         ],
-                        value=1,
+                        value=0,
                         label="Refino da superfície",
                     )
                     smoothing = gr.Dropdown(
                         choices=["Desligado", "Leve", "Média", "Forte"],
-                        value="Média",
+                        value="Desligado",
                         label="Suavização Taubin",
                     )
                     cleanup_percent = gr.Slider(
@@ -247,13 +285,11 @@ with gr.Blocks(title=TITLE) as demo:
                         label="Limpeza conservadora de ilhas (% do maior shell)",
                     )
                     gr.Markdown(
-                        "**1x** subdivide cada triângulo em quatro antes do Taubin e é o teste "
-                        "recomendado. **2x** pode chegar perto de 650 mil faces numa malha 192 e "
-                        "é experimental. Refino, suavização, limpeza, altura e base usam o botão "
-                        "de reprocessamento e não rodam o TripoSR."
+                        "Para julgar o novo motor, comece com **refino e suavização desligados**. "
+                        "Se a malha bruta for boa, o acabamento pode ser testado depois sem reconstruir."
                     )
 
-                generate_button = gr.Button("Reconstruir + gerar STL", variant="primary")
+                generate_button = gr.Button("Reconstruir com motor selecionado + gerar STL", variant="primary")
                 reprocess_button = gr.Button("⚡ Reprocessar acabamento sem reconstruir")
 
             with gr.Column(scale=1):
@@ -262,11 +298,8 @@ with gr.Blocks(title=TITLE) as demo:
                 status = gr.Markdown()
                 report = gr.JSON(label="Relatório de imprimibilidade")
 
-                with gr.Accordion("Arquivos técnicos V4", open=False):
-                    gr.Markdown(
-                        "Arquivos intermediários para comparação, diagnóstico ou edição externa."
-                    )
-                    raw_download = gr.File(label="Malha bruta do TripoSR (OBJ)")
+                with gr.Accordion("Arquivos técnicos V5", open=False):
+                    raw_download = gr.File(label="Malha bruta do motor (GLB/OBJ)")
                     cleaned_download = gr.File(label="Após limpeza conservadora (OBJ)")
                     refined_download = gr.File(label="Após refino da superfície (OBJ)")
                     smoothed_download = gr.File(label="Após suavização (OBJ)")
@@ -275,12 +308,14 @@ with gr.Blocks(title=TITLE) as demo:
             fn=_generate_from_image,
             inputs=[
                 image,
+                engine,
                 height,
                 add_base,
                 base_height,
                 base_margin,
                 resolution,
                 foreground_ratio,
+                sf3d_texture,
                 refinement,
                 smoothing,
                 cleanup_percent,
@@ -323,40 +358,17 @@ with gr.Blocks(title=TITLE) as demo:
 
     with gr.Tab("Malha pronta → STL"):
         gr.Markdown(
-            "Use esta aba quando você já tiver um `.obj`, `.glb`, `.gltf`, `.ply` ou `.stl`. "
-            "O refino fica desligado por padrão para não alterar uma malha externa sem intenção."
+            "Use esta aba quando você já tiver um `.obj`, `.glb`, `.gltf`, `.ply` ou `.stl`."
         )
         with gr.Row():
             with gr.Column():
                 mesh_input = gr.Model3D(label="Malha de entrada")
-                mesh_height = gr.Slider(
-                    50,
-                    300,
-                    value=120,
-                    step=1,
-                    label="Altura total final (mm)",
-                )
-                mesh_base = gr.Checkbox(value=True, label="Adicionar base redonda")
-                mesh_base_height = gr.Slider(
-                    1,
-                    10,
-                    value=3,
-                    step=0.5,
-                    label="Altura da base (mm)",
-                )
-                mesh_base_margin = gr.Slider(
-                    0,
-                    15,
-                    value=3,
-                    step=0.5,
-                    label="Margem da base (mm)",
-                )
+                mesh_height = gr.Slider(50, 300, value=120, step=1, label="Altura total final (mm)")
+                mesh_base = gr.Checkbox(value=False, label="Adicionar base redonda")
+                mesh_base_height = gr.Slider(1, 10, value=3, step=0.5, label="Altura da base (mm)")
+                mesh_base_margin = gr.Slider(0, 15, value=3, step=0.5, label="Margem da base (mm)")
                 mesh_refinement = gr.Dropdown(
-                    choices=[
-                        ("Desligado", 0),
-                        ("1x", 1),
-                        ("2x — experimental", 2),
-                    ],
+                    choices=[("Desligado", 0), ("1x", 1), ("2x — experimental", 2)],
                     value=0,
                     label="Refino da superfície",
                 )
@@ -391,19 +403,13 @@ with gr.Blocks(title=TITLE) as demo:
                 mesh_smoothing,
                 mesh_cleanup,
             ],
-            outputs=[
-                prepared_model,
-                prepared_download,
-                prepared_report,
-                prepared_status,
-            ],
+            outputs=[prepared_model, prepared_download, prepared_report, prepared_status],
         )
 
     gr.Markdown(
         "---\n"
-        "**Regra do MVP:** arquivo gerado por IA nunca pula a inspeção no slicer. "
-        "Refino deixa a superfície mais densa, mas não cria detalhes que a reconstrução original "
-        "não capturou. Se `final_watertight: false`, trate como pendência de reparo."
+        "**Teste V5:** compare primeiro a malha SF3D sem base, sem subdivisão e sem smoothing. "
+        "Se a reconstrução bruta continuar ruim, trocar acabamento não vai salvar o modelo."
     )
 
 

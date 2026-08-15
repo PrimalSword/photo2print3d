@@ -8,12 +8,19 @@ import shutil
 from uuid import uuid4
 
 from .config import Settings
-from .generator import TripoSRGenerator
+from .generator import StableFast3DGenerator, TripoSRGenerator
 from .mesh import MeshReport, prepare_mesh
 from .preprocess import prepare_reference_image
 
 
-CACHE_SCHEMA_VERSION = "triposr-v3-1"
+CACHE_SCHEMA_VERSION = "reconstruction-v5-1"
+ENGINE_ALIASES = {
+    "sf3d": "sf3d",
+    "stable-fast-3d": "sf3d",
+    "stable fast 3d": "sf3d",
+    "triposr": "triposr",
+    "tripo": "triposr",
+}
 
 
 @dataclass(frozen=True)
@@ -22,6 +29,7 @@ class ReconstructionResult:
     prepared_image_path: Path
     cache_key: str
     cache_hit: bool
+    engine: str
 
 
 @dataclass(frozen=True)
@@ -44,6 +52,15 @@ class PipelineResult:
     report: MeshReport
     cache_key: str
     cache_hit: bool
+    engine: str
+
+
+def _normalise_engine(engine: str) -> str:
+    key = str(engine).strip().lower()
+    try:
+        return ENGINE_ALIASES[key]
+    except KeyError as exc:
+        raise ValueError("Unknown reconstruction engine. Use 'sf3d' or 'triposr'.") from exc
 
 
 def _hash_file(path: Path, digest: hashlib._Hash) -> None:
@@ -55,13 +72,20 @@ def _hash_file(path: Path, digest: hashlib._Hash) -> None:
 def _reconstruction_cache_key(
     prepared_image: Path,
     *,
+    engine: str,
     mc_resolution: int,
     foreground_ratio: float,
+    sf3d_texture_resolution: int,
 ) -> str:
+    engine = _normalise_engine(engine)
     digest = hashlib.sha256()
     digest.update(CACHE_SCHEMA_VERSION.encode("utf-8"))
-    digest.update(f"|mc={int(mc_resolution)}".encode("utf-8"))
+    digest.update(f"|engine={engine}".encode("utf-8"))
     digest.update(f"|fg={float(foreground_ratio):.6f}".encode("utf-8"))
+    if engine == "triposr":
+        digest.update(f"|mc={int(mc_resolution)}".encode("utf-8"))
+    else:
+        digest.update(f"|texture={int(sf3d_texture_resolution)}".encode("utf-8"))
     _hash_file(prepared_image, digest)
     return digest.hexdigest()
 
@@ -69,12 +93,15 @@ def _reconstruction_cache_key(
 def reconstruct_image(
     image_path: str | Path,
     *,
+    engine: str = "sf3d",
     mc_resolution: int = 192,
     foreground_ratio: float = 0.85,
+    sf3d_texture_resolution: int = 256,
     settings: Settings | None = None,
 ) -> ReconstructionResult:
-    """Run TripoSR once and persist the raw geometry in a content-addressed cache."""
+    """Run the selected reconstruction engine once and cache its raw geometry."""
 
+    engine = _normalise_engine(engine)
     settings = settings or Settings.from_env()
     settings.ensure_runtime_dirs()
 
@@ -86,13 +113,16 @@ def reconstruct_image(
         prepare_reference_image(image_path, staged_image)
         cache_key = _reconstruction_cache_key(
             staged_image,
+            engine=engine,
             mc_resolution=mc_resolution,
             foreground_ratio=foreground_ratio,
+            sf3d_texture_resolution=sf3d_texture_resolution,
         )
 
         cache_dir = settings.work_dir / "cache" / "reconstructions" / cache_key
         cached_image = cache_dir / "reference.png"
-        cached_mesh = cache_dir / "raw" / "mesh.obj"
+        extension = ".glb" if engine == "sf3d" else ".obj"
+        cached_mesh = cache_dir / "raw" / f"mesh{extension}"
         metadata_path = cache_dir / "cache.json"
 
         if cached_mesh.exists() and cached_mesh.stat().st_size > 0:
@@ -104,22 +134,43 @@ def reconstruct_image(
                 prepared_image_path=cached_image,
                 cache_key=cache_key,
                 cache_hit=True,
+                engine=engine,
             )
 
         cache_dir.mkdir(parents=True, exist_ok=True)
         cached_mesh.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(staged_image, cached_image)
 
-        generator = TripoSRGenerator(
-            settings.triposr_dir,
-            device=settings.triposr_device,
-        )
-        generation = generator.generate(
-            cached_image,
-            cache_dir / "engine-output",
-            mc_resolution=mc_resolution,
-            foreground_ratio=foreground_ratio,
-        )
+        if engine == "sf3d":
+            if settings.sf3d_dir is None:
+                raise RuntimeError("SF3D_DIR is not configured.")
+            generator = StableFast3DGenerator(
+                settings.sf3d_dir,
+                python_executable=settings.sf3d_python,
+                device=settings.sf3d_device,
+            )
+            generation = generator.generate(
+                cached_image,
+                cache_dir / "engine-output",
+                foreground_ratio=foreground_ratio,
+                texture_resolution=sf3d_texture_resolution,
+                remesh_option="none",
+                target_vertex_count=-1,
+            )
+            device = settings.sf3d_device
+        else:
+            generator = TripoSRGenerator(
+                settings.triposr_dir,
+                device=settings.triposr_device,
+            )
+            generation = generator.generate(
+                cached_image,
+                cache_dir / "engine-output",
+                mc_resolution=mc_resolution,
+                foreground_ratio=foreground_ratio,
+            )
+            device = settings.triposr_device
+
         shutil.copy2(generation.mesh_path, cached_mesh)
 
         metadata_path.write_text(
@@ -127,9 +178,13 @@ def reconstruct_image(
                 {
                     "schema": CACHE_SCHEMA_VERSION,
                     "cache_key": cache_key,
-                    "mc_resolution": int(mc_resolution),
+                    "engine": engine,
+                    "mc_resolution": int(mc_resolution) if engine == "triposr" else None,
+                    "sf3d_texture_resolution": (
+                        int(sf3d_texture_resolution) if engine == "sf3d" else None
+                    ),
                     "foreground_ratio": float(foreground_ratio),
-                    "device": settings.triposr_device,
+                    "device": device,
                 },
                 indent=2,
             ),
@@ -141,6 +196,7 @@ def reconstruct_image(
             prepared_image_path=cached_image,
             cache_key=cache_key,
             cache_hit=False,
+            engine=engine,
         )
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
@@ -150,15 +206,15 @@ def finish_reconstruction(
     raw_mesh_path: str | Path,
     *,
     target_height_mm: float = 140.0,
-    add_base: bool = True,
+    add_base: bool = False,
     base_height_mm: float = 4.0,
     base_margin_mm: float = 5.0,
-    refinement_passes: int = 1,
-    smoothing_level: str = "medium",
+    refinement_passes: int = 0,
+    smoothing_level: str = "off",
     cleanup_min_shell_percent: float = 0.5,
     settings: Settings | None = None,
 ) -> FinishResult:
-    """Re-run only mesh finishing steps; never invoke the 3D reconstruction model."""
+    """Re-run only mesh finishing steps; never invoke a reconstruction model."""
 
     settings = settings or Settings.from_env()
     settings.ensure_runtime_dirs()
@@ -199,14 +255,16 @@ def finish_reconstruction(
 def generate_printable_model(
     image_path: str | Path,
     *,
+    engine: str = "sf3d",
     target_height_mm: float = 140.0,
-    add_base: bool = True,
+    add_base: bool = False,
     base_height_mm: float = 4.0,
     base_margin_mm: float = 5.0,
     mc_resolution: int = 192,
     foreground_ratio: float = 0.85,
-    refinement_passes: int = 1,
-    smoothing_level: str = "medium",
+    sf3d_texture_resolution: int = 256,
+    refinement_passes: int = 0,
+    smoothing_level: str = "off",
     cleanup_min_shell_percent: float = 0.5,
     settings: Settings | None = None,
 ) -> PipelineResult:
@@ -214,8 +272,10 @@ def generate_printable_model(
 
     reconstruction = reconstruct_image(
         image_path,
+        engine=engine,
         mc_resolution=mc_resolution,
         foreground_ratio=foreground_ratio,
+        sf3d_texture_resolution=sf3d_texture_resolution,
         settings=settings,
     )
     finishing = finish_reconstruction(
@@ -240,4 +300,5 @@ def generate_printable_model(
         report=finishing.report,
         cache_key=reconstruction.cache_key,
         cache_hit=reconstruction.cache_hit,
+        engine=reconstruction.engine,
     )
