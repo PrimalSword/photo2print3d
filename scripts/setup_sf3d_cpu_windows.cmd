@@ -35,7 +35,7 @@ git -C "%SF3D_DIR%" checkout "%SF3D_COMMIT%"
 if errorlevel 1 exit /b 1
 
 if not exist "%SF3D_DIR%\.venv\Scripts\python.exe" (
-  echo [3/7] Criando ambiente Python isolado do SF3D...
+  echo [3/7] Criando ambiente Python 3.11 isolado do SF3D...
   py -3.11 -m venv "%SF3D_DIR%\.venv"
   if errorlevel 1 (
     echo [ERRO] Nao foi possivel criar o venv com Python 3.11.
@@ -53,12 +53,12 @@ if errorlevel 1 exit /b 1
 "%PY%" -m pip install "setuptools==69.5.1" wheel
 if errorlevel 1 exit /b 1
 
-echo [5/7] Instalando PyTorch CPU no ambiente isolado...
-"%PY%" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+echo [5/7] Instalando PyTorch CPU conhecido e compativel...
+"%PY%" -m pip install "torch==2.4.1" "torchvision==0.19.1" --index-url https://download.pytorch.org/whl/cpu
 if errorlevel 1 exit /b 1
 
 echo [6/7] Preparando requirements CPU do SF3D...
-"%ROOT%\.venv\Scripts\python.exe" "%ROOT%\scripts\prepare_sf3d_cpu_requirements.py" "%SF3D_DIR%"
+"%PY%" "%ROOT%\scripts\prepare_sf3d_cpu_requirements.py" "%SF3D_DIR%"
 if errorlevel 1 exit /b 1
 
 pushd "%SF3D_DIR%"
